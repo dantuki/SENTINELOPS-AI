@@ -1,0 +1,7 @@
+{
+  "name": "@sentinelops/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "API de producto de SentinelOps AI"
+}

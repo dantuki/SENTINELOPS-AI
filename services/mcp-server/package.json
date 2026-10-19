@@ -1,0 +1,7 @@
+{
+  "name": "@sentinelops/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor MCP de herramientas autorizadas para SentinelOps AI"
+}
