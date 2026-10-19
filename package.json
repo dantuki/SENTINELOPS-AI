@@ -1,0 +1,18 @@
+{
+  "name": "sentinelops-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma de investigación y diagnóstico de incidentes de software asistida por IA.",
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24.22.0 <25",
+    "npm": ">=11.19.1 <12"
+  },
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "services/mcp-server",
+    "packages/shared-contracts",
+    "packages/config"
+  ]
+}

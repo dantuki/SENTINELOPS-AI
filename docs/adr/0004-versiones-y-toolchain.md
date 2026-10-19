@@ -24,6 +24,9 @@ La instalación global de una herramienta no determina automáticamente la versi
 ## 2. Runtime de Node.js
 
 ### Decisión provisional
+El entorno local fue verificado el 17 de octubre de 2026 con Node.js `v24.22.0` y npm `11.19.1`.
+
+Estas son las versiones observadas y seleccionadas como referencia inicial del proyecto. Se volverán a comprobar en la configuración de CI y en los contenedores antes de considerar el entorno reproducible.code package.json
 
 Utilizar Node.js 24 LTS como versión objetivo del proyecto.
 

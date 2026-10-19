@@ -1,0 +1,7 @@
+{
+  "name": "@sentinelops/shared-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Contratos y esquemas compartidos entre los servicios TypeScript"
+}

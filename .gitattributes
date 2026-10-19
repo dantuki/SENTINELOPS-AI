@@ -1,0 +1,28 @@
+
+# Detect text files automatically
+* text=auto
+
+# Use LF for project source and documentation
+*.md text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+.gitignore text eol=lf
+
+# Preserve Windows line endings for Windows command scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf

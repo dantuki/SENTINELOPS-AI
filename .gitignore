@@ -1,0 +1,58 @@
+
+# Node.js and frontend build output
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Python virtual environments and caches
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# Local development data
+.local-data/
+.docker-data/
+infra/.volumes/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Test reports
+playwright-report/
+test-results/
+reports/
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
