@@ -14,5 +14,8 @@
     "services/mcp-server",
     "packages/shared-contracts",
     "packages/config"
-  ]
+  ],
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
 }

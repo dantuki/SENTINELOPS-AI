@@ -3,5 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "API de producto de SentinelOps AI"
+  "description": "API de producto de SentinelOps AI",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc --project tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "tsx --test tests/app.test.ts",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^5.12.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
 }
