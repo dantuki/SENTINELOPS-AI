@@ -2,6 +2,14 @@
 import { Pool } from "pg";
 
 import { buildApp } from "./app.js";
+import { DocumentRepository } from "./document-repository.js";
+import { registerDocumentRoutes } from "./document-routes.js";
+import { DocumentChunkRepository } from "./chunk-repository.js";
+import { registerChunkRoutes } from "./chunk-routes.js";
+import { ProductRepository } from "./product-repository.js";
+import { registerProductRoutes } from "./product-routes.js";
+import { ProjectSourceRepository } from "./source-repository.js";
+import { registerSourceRoutes } from "./source-routes.js";
 
 function createPostgresPool(): Pool | undefined {
   const database = process.env.POSTGRES_DB;
@@ -55,6 +63,27 @@ async function main(): Promise<void> {
         }
       : {}),
   });
+
+  const productRepository = postgresPool
+    ? new ProductRepository(postgresPool)
+    : undefined;
+
+  const sourceRepository = postgresPool
+    ? new ProjectSourceRepository(postgresPool)
+    : undefined;
+
+  const documentRepository = postgresPool
+    ? new DocumentRepository(postgresPool)
+    : undefined;
+
+  const chunkRepository = postgresPool
+    ? new DocumentChunkRepository(postgresPool)
+    : undefined;
+
+  registerProductRoutes(app, productRepository);
+  registerSourceRoutes(app, sourceRepository);
+  registerDocumentRoutes(app, documentRepository);
+  registerChunkRoutes(app, chunkRepository);
 
   postgresPool?.on("error", () => {
     app.log.error("Unexpected PostgreSQL pool error");
