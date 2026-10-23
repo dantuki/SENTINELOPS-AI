@@ -560,3 +560,28 @@ a:focus-visible {
 .environment-tag--offline {
   border-color: rgba(251, 113, 133, 0.4);
 }
+/* Estado independiente de cada servicio */
+.service-status-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+
+/* Evita desbordamientos cuando el encabezado se estrecha */
+.header-inner {
+  flex-wrap: wrap;
+}
+
+.environment-tag--online {
+  border-color: rgba(83, 212, 160, 0.35);
+}
+
+@media (max-width: 620px) {
+  .service-status-group {
+    margin-left: auto;
+    gap: 6px;
+  }
+}
