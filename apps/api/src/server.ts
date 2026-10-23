@@ -1,5 +1,39 @@
 
+import { Pool } from "pg";
+
 import { buildApp } from "./app.js";
+
+function createPostgresPool(): Pool | undefined {
+  const database = process.env.POSTGRES_DB;
+  const user = process.env.POSTGRES_USER;
+  const password = process.env.POSTGRES_PASSWORD;
+  const rawPort = process.env.POSTGRES_PORT ?? "5432";
+  const port = Number(rawPort);
+
+  if (
+    !database ||
+    !user ||
+    !password ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    return undefined;
+  }
+
+  return new Pool({
+    host: process.env.POSTGRES_HOST ?? "127.0.0.1",
+    port,
+    database,
+    user,
+    password,
+    max: 5,
+    connectionTimeoutMillis: 2000,
+    idleTimeoutMillis: 30000,
+    statement_timeout: 2000,
+    query_timeout: 2500,
+  });
+}
 
 async function main(): Promise<void> {
   const host = process.env.API_HOST ?? "127.0.0.1";
@@ -10,7 +44,27 @@ async function main(): Promise<void> {
     throw new Error("API_PORT debe ser un puerto válido entre 1 y 65535.");
   }
 
-  const app = buildApp();
+  const postgresPool = createPostgresPool();
+
+  const app = buildApp({
+    ...(postgresPool
+      ? {
+          postgresHealthCheck: async () => {
+            await postgresPool.query("SELECT 1");
+          },
+        }
+      : {}),
+  });
+
+  postgresPool?.on("error", () => {
+    app.log.error("Unexpected PostgreSQL pool error");
+  });
+
+  app.addHook("onClose", async () => {
+    if (postgresPool) {
+      await postgresPool.end();
+    }
+  });
 
   try {
     const address = await app.listen({ host, port });

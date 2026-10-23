@@ -198,3 +198,74 @@ test("unknown routes still return 404", async () => {
 
   assert.equal(response.statusCode, 404);
 });
+
+test("PostgreSQL dependency returns 200 when PostgreSQL is healthy", async () => {
+  let healthCheckCalled = false;
+
+  const app = createTestApp({
+    postgresHealthCheck: async () => {
+      healthCheckCalled = true;
+    },
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/health/dependencies/postgres",
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(healthCheckCalled, true);
+  assert.deepEqual(response.json(), {
+    status: "ok",
+    service: "sentinelops-product-api",
+    dependency: {
+      name: "postgres",
+      status: "ok",
+    },
+  });
+});
+
+test("PostgreSQL dependency returns 503 without exposing internal errors", async () => {
+  const app = createTestApp({
+    postgresHealthCheck: async () => {
+      throw new Error("private connection details");
+    },
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/health/dependencies/postgres",
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    status: "error",
+    service: "sentinelops-product-api",
+    dependency: {
+      name: "postgres",
+      status: "unavailable",
+    },
+    message: "PostgreSQL unavailable",
+  });
+  assert.equal(response.body.includes("private connection details"), false);
+});
+
+test("PostgreSQL dependency returns 503 when no health check is configured", async () => {
+  const app = createTestApp();
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/health/dependencies/postgres",
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    status: "error",
+    service: "sentinelops-product-api",
+    dependency: {
+      name: "postgres",
+      status: "unavailable",
+    },
+    message: "PostgreSQL unavailable",
+  });
+});
