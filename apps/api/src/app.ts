@@ -25,11 +25,31 @@ interface AiDependencyErrorResponse {
   message: "AI orchestrator unavailable";
 }
 
+interface PostgresDependencyResponse {
+  status: "ok";
+  service: "sentinelops-product-api";
+  dependency: {
+    name: "postgres";
+    status: "ok";
+  };
+}
+
+interface PostgresDependencyErrorResponse {
+  status: "error";
+  service: "sentinelops-product-api";
+  dependency: {
+    name: "postgres";
+    status: "unavailable";
+  };
+  message: "PostgreSQL unavailable";
+}
+
 interface BuildAppOptions {
   logger?: boolean;
   aiOrchestratorUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  postgresHealthCheck?: () => Promise<void>;
 }
 
 const aiDependencySchema = {
@@ -74,6 +94,48 @@ const aiDependencyErrorSchema = {
     message: {
       type: "string",
       const: "AI orchestrator unavailable",
+    },
+  },
+  required: ["status", "service", "dependency", "message"],
+  additionalProperties: false,
+} as const;
+
+const postgresDependencySchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", const: "ok" },
+    service: { type: "string", const: "sentinelops-product-api" },
+    dependency: {
+      type: "object",
+      properties: {
+        name: { type: "string", const: "postgres" },
+        status: { type: "string", const: "ok" },
+      },
+      required: ["name", "status"],
+      additionalProperties: false,
+    },
+  },
+  required: ["status", "service", "dependency"],
+  additionalProperties: false,
+} as const;
+
+const postgresDependencyErrorSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", const: "error" },
+    service: { type: "string", const: "sentinelops-product-api" },
+    dependency: {
+      type: "object",
+      properties: {
+        name: { type: "string", const: "postgres" },
+        status: { type: "string", const: "unavailable" },
+      },
+      required: ["name", "status"],
+      additionalProperties: false,
+    },
+    message: {
+      type: "string",
+      const: "PostgreSQL unavailable",
     },
   },
   required: ["status", "service", "dependency", "message"],
@@ -189,6 +251,52 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           service: "sentinelops-product-api",
           dependency: {
             name: "sentinelops-ai-orchestrator",
+            status: "ok",
+          },
+        };
+
+        return reply.code(200).send(result);
+      } catch {
+        return reply.code(503).send(unavailable);
+      }
+    },
+  );
+
+  app.get<{
+    Reply: PostgresDependencyResponse | PostgresDependencyErrorResponse;
+  }>(
+    "/health/dependencies/postgres",
+    {
+      schema: {
+        response: {
+          200: postgresDependencySchema,
+          503: postgresDependencyErrorSchema,
+        },
+      },
+    },
+    async (_request, reply) => {
+      const unavailable: PostgresDependencyErrorResponse = {
+        status: "error",
+        service: "sentinelops-product-api",
+        dependency: {
+          name: "postgres",
+          status: "unavailable",
+        },
+        message: "PostgreSQL unavailable",
+      };
+
+      if (!options.postgresHealthCheck) {
+        return reply.code(503).send(unavailable);
+      }
+
+      try {
+        await options.postgresHealthCheck();
+
+        const result: PostgresDependencyResponse = {
+          status: "ok",
+          service: "sentinelops-product-api",
+          dependency: {
+            name: "postgres",
             status: "ok",
           },
         };
