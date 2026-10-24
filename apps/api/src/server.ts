@@ -1,6 +1,6 @@
 
 import { Pool } from "pg";
-
+import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { buildApp } from "./app.js";
 import { DocumentRepository } from "./document-repository.js";
 import { registerDocumentRoutes } from "./document-routes.js";
@@ -80,10 +80,11 @@ async function main(): Promise<void> {
     ? new DocumentChunkRepository(postgresPool)
     : undefined;
 
-  registerProductRoutes(app, productRepository);
-  registerSourceRoutes(app, sourceRepository);
-  registerDocumentRoutes(app, documentRepository);
-  registerChunkRoutes(app, chunkRepository);
+registerProductRoutes(app, productRepository);
+registerSourceRoutes(app, sourceRepository);
+registerDocumentRoutes(app, documentRepository);
+registerChunkRoutes(app, chunkRepository);
+registerEmbeddingRoutes(app, chunkRepository);;
 
   postgresPool?.on("error", () => {
     app.log.error("Unexpected PostgreSQL pool error");

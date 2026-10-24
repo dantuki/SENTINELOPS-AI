@@ -4,10 +4,14 @@ import type { FastifyInstance } from "fastify";
 
 import { buildApp } from "../src/app.js";
 import type {
+  ChunkEmbeddingInput,
   CreateDocumentChunkInput,
   DocumentChunkRecord,
+  PendingEmbeddingChunk,
+  SemanticSearchChunkRecord,
 } from "../src/chunk-repository.js";
 import { registerChunkRoutes } from "../src/chunk-routes.js";
+import { registerEmbeddingRoutes } from "../src/embedding-routes.js";
 import type {
   CreateDocumentInput,
   DocumentRecord,
@@ -290,6 +294,7 @@ test("PostgreSQL dependency returns 503 when no health check is configured", asy
     message: "PostgreSQL unavailable",
   });
 });
+
 const repositoryTestDate = new Date("2026-01-01T00:00:00.000Z");
 
 const repositoryTestWorkspace: WorkspaceRecord = {
@@ -1166,4 +1171,306 @@ test("Document chunk routes return 503 when persistence is unavailable", async (
   assert.deepEqual(response.json(), {
     error: "Persistence unavailable",
   });
+});
+
+interface EmbeddingTestStore {
+  projectExists(projectId: string): Promise<boolean>;
+  listWithoutEmbeddingsForDocument(
+    projectId: string,
+    documentId: string,
+    limit?: number,
+  ): Promise<PendingEmbeddingChunk[] | null>;
+  saveEmbeddingsForDocument(
+    projectId: string,
+    documentId: string,
+    embeddings: ChunkEmbeddingInput[],
+  ): Promise<number | null>;
+  searchSimilarChunks(
+    projectId: string,
+    embedding: number[],
+    limit?: number,
+  ): Promise<SemanticSearchChunkRecord[] | null>;
+}
+
+function createFakeEmbeddingStore(
+  overrides: Partial<EmbeddingTestStore> = {},
+): EmbeddingTestStore {
+  return {
+    projectExists:
+      overrides.projectExists ??
+      (async (projectId) => projectId === sourceTestProjectId),
+
+    listWithoutEmbeddingsForDocument:
+      overrides.listWithoutEmbeddingsForDocument ??
+      (async (projectId, documentId) =>
+        projectId === sourceTestProjectId &&
+        documentId === documentTestRecord.id
+          ? [
+              {
+                id: chunkTestRecord.id,
+                ordinal: chunkTestRecord.ordinal,
+                content: chunkTestRecord.content,
+              },
+            ]
+          : null),
+
+    saveEmbeddingsForDocument:
+      overrides.saveEmbeddingsForDocument ??
+      (async (_projectId, _documentId, embeddings) => embeddings.length),
+
+    searchSimilarChunks:
+      overrides.searchSimilarChunks ??
+      (async (projectId) =>
+        projectId === sourceTestProjectId
+          ? [
+              {
+                id: chunkTestRecord.id,
+                projectId: sourceTestProjectId,
+                documentId: documentTestRecord.id,
+                ordinal: chunkTestRecord.ordinal,
+                content: chunkTestRecord.content,
+                score: 0.91,
+              },
+            ]
+          : null),
+  };
+}
+
+const fakeEmbeddingVector = (): number[] =>
+  Array.from({ length: 1536 }, () => 0.125);
+
+function fakeEmbeddingPayload(count: number): unknown {
+  return {
+    model: "text-embedding-3-small",
+    dimensions: 1536,
+    data: Array.from({ length: count }, (_, index) => ({
+      index,
+      embedding: fakeEmbeddingVector(),
+    })),
+  };
+}
+
+test("POST document embeddings generates and stores pending vectors", async () => {
+  let requestedUrl = "";
+  let requestedTexts: string[] = [];
+  let savedEmbeddings: ChunkEmbeddingInput[] = [];
+
+  const store = createFakeEmbeddingStore({
+    saveEmbeddingsForDocument: async (_projectId, _documentId, embeddings) => {
+      savedEmbeddings = embeddings;
+      return embeddings.length;
+    },
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    aiOrchestratorUrl: "http://127.0.0.1:8000",
+    fetchImpl: async (input, init) => {
+      requestedUrl = String(input);
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      requestedTexts = body.texts;
+      return Response.json(fakeEmbeddingPayload(body.texts.length));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(requestedUrl, "http://127.0.0.1:8000/embeddings");
+  assert.deepEqual(requestedTexts, [chunkTestRecord.content]);
+  assert.equal(response.json().data.processed, 1);
+  assert.equal(response.json().data.model, "text-embedding-3-small");
+  assert.equal(response.json().data.hasMore, false);
+  assert.equal(savedEmbeddings.length, 1);
+  assert.equal(savedEmbeddings[0]?.id, chunkTestRecord.id);
+  assert.equal(savedEmbeddings[0]?.embedding.length, 1536);
+  assert.equal(savedEmbeddings[0]?.model, "text-embedding-3-small");
+});
+
+test("POST document embeddings returns 404 when document is not in project", async () => {
+  let providerCalled = false;
+  const store = createFakeEmbeddingStore({
+    listWithoutEmbeddingsForDocument: async () => null,
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async () => {
+      providerCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Document not found in this project",
+  });
+  assert.equal(providerCalled, false);
+});
+
+test("POST document embeddings returns 503 when orchestrator is unavailable", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
+    fetchImpl: async () => {
+      throw new Error("private network failure details");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Embedding service unavailable",
+  });
+  assert.equal(response.body.includes("private network failure details"), false);
+});
+
+test("POST project search returns semantic results", async () => {
+  let requestedTexts: string[] = [];
+  let capturedLimit: number | undefined;
+
+  const store = createFakeEmbeddingStore({
+    searchSimilarChunks: async (_projectId, embedding, limit) => {
+      assert.equal(embedding.length, 1536);
+      capturedLimit = limit;
+      return [
+        {
+          id: chunkTestRecord.id,
+          projectId: sourceTestProjectId,
+          documentId: documentTestRecord.id,
+          ordinal: 0,
+          content: chunkTestRecord.content,
+          score: 0.91,
+        },
+      ];
+    },
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      requestedTexts = body.texts;
+      return Response.json(fakeEmbeddingPayload(body.texts.length));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: {
+      query: "¿Por qué presenta latencia la API?",
+      limit: 3,
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(requestedTexts, ["¿Por qué presenta latencia la API?"]);
+  assert.equal(capturedLimit, 3);
+  assert.equal(response.json().data.results.length, 1);
+  assert.equal(response.json().data.results[0].score, 0.91);
+  assert.equal(response.json().data.model, "text-embedding-3-small");
+});
+
+test("POST project search returns 404 before embedding unknown project", async () => {
+  let providerCalled = false;
+  const store = createFakeEmbeddingStore({
+    projectExists: async () => false,
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async () => {
+      providerCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/search`,
+    payload: { query: "consulta de prueba" },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), { error: "Project not found" });
+  assert.equal(providerCalled, false);
+});
+
+test("Embedding routes return 502 for invalid provider vector dimensions", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
+    fetchImpl: async () =>
+      Response.json({
+        model: "text-embedding-3-small",
+        dimensions: 1536,
+        data: [{ index: 0, embedding: [0.1, 0.2] }],
+      }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "Invalid embedding response",
+  });
+});
+
+test("Embedding routes return 503 when persistence is unavailable", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app);
+
+  const batchResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  const searchResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "consulta de prueba" },
+  });
+
+  assert.equal(batchResponse.statusCode, 503);
+  assert.equal(searchResponse.statusCode, 503);
+  assert.deepEqual(batchResponse.json(), {
+    error: "Persistence unavailable",
+  });
+  assert.deepEqual(searchResponse.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+test("POST project search rejects blank query and out-of-range limit", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore());
+
+  const blankQuery = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "   " },
+  });
+
+  const excessiveLimit = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "consulta válida", limit: 100 },
+  });
+
+  assert.equal(blankQuery.statusCode, 400);
+  assert.equal(excessiveLimit.statusCode, 400);
 });

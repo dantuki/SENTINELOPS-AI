@@ -1,10 +1,19 @@
 
 """FastAPI application for the SentinelOps AI orchestrator."""
 
+import os
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException
+from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel, Field, field_validator
+
+
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
+MAX_BATCH_SIZE = 32
+MAX_TEXT_CHARS = 20_000
 
 
 class HealthResponse(BaseModel):
@@ -12,6 +21,60 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok"]
     service: str
+
+
+class EmbeddingRequest(BaseModel):
+    """Input texts to convert into vector embeddings."""
+
+    texts: list[str] = Field(
+        min_length=1,
+        max_length=MAX_BATCH_SIZE,
+    )
+
+    @field_validator("texts")
+    @classmethod
+    def validate_texts(cls, texts: list[str]) -> list[str]:
+        """Reject blank or excessively long texts."""
+        for text in texts:
+            if not text.strip():
+                raise ValueError("Texts must not be empty.")
+            if len(text) > MAX_TEXT_CHARS:
+                raise ValueError(
+                    f"Each text must be at most {MAX_TEXT_CHARS} characters."
+                )
+        return texts
+
+
+class EmbeddingItem(BaseModel):
+    """A vector returned for one input text."""
+
+    index: int
+    embedding: list[float] = Field(
+        min_length=EMBEDDING_DIMENSIONS,
+        max_length=EMBEDDING_DIMENSIONS,
+    )
+
+
+class EmbeddingResponse(BaseModel):
+    """Embedding generation response."""
+
+    model: str
+    dimensions: int
+    data: list[EmbeddingItem]
+
+
+class EmbeddingProviderNotConfigured(Exception):
+    """Raised when the provider API key is missing."""
+
+
+class EmbeddingProviderRequestError(Exception):
+    """Raised when the provider fails or returns an invalid response."""
+
+
+EmbeddingGenerator = Callable[
+    [list[str]],
+    Awaitable[tuple[str, list[list[float]]]],
+]
 
 
 app = FastAPI(
@@ -31,11 +94,93 @@ app = FastAPI(
     summary="Check whether the service process is responding",
 )
 def health_check() -> HealthResponse:
-    """Return the process liveness status.
-
-    This endpoint does not verify PostgreSQL, MCP, or model-provider health.
-    """
+    """Return process liveness, without checking external dependencies."""
     return HealthResponse(
         status="ok",
         service="sentinelops-ai-orchestrator",
+    )
+
+
+async def generate_embeddings(
+    texts: list[str],
+) -> tuple[str, list[list[float]]]:
+    """Generate text embeddings using the configured OpenAI model."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        raise EmbeddingProviderNotConfigured
+
+    try:
+        async with AsyncOpenAI(
+            api_key=api_key,
+            timeout=20.0,
+            max_retries=1,
+        ) as client:
+            response = await client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=texts,
+                encoding_format="float",
+            )
+    except OpenAIError as exc:
+        raise EmbeddingProviderRequestError from exc
+
+    items = sorted(response.data, key=lambda item: item.index)
+
+    if len(items) != len(texts):
+        raise EmbeddingProviderRequestError
+
+    for expected_index, item in enumerate(items):
+        if (
+            item.index != expected_index
+            or len(item.embedding) != EMBEDDING_DIMENSIONS
+        ):
+            raise EmbeddingProviderRequestError
+
+    return response.model, [item.embedding for item in items]
+
+
+def get_embedding_generator() -> EmbeddingGenerator:
+    """Dependency hook that allows the provider to be replaced in tests."""
+    return generate_embeddings
+
+
+@app.post(
+    "/embeddings",
+    response_model=EmbeddingResponse,
+    tags=["Embeddings"],
+    summary="Generate vector embeddings for a batch of texts",
+)
+async def create_embeddings(
+    payload: EmbeddingRequest,
+    generator: EmbeddingGenerator = Depends(get_embedding_generator),
+) -> EmbeddingResponse:
+    """Return one 1536-dimensional vector for each input text."""
+    try:
+        model, vectors = await generator(payload.texts)
+    except EmbeddingProviderNotConfigured:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding provider is not configured.",
+        ) from None
+    except EmbeddingProviderRequestError:
+        raise HTTPException(
+            status_code=502,
+            detail="Embedding provider request failed.",
+        ) from None
+
+    if len(vectors) != len(payload.texts) or any(
+        len(vector) != EMBEDDING_DIMENSIONS for vector in vectors
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Embedding provider returned an invalid response.",
+        )
+
+    return EmbeddingResponse(
+        model=model,
+        dimensions=EMBEDDING_DIMENSIONS,
+        data=[
+            EmbeddingItem(index=index, embedding=vector)
+            for index, vector in enumerate(vectors)
+        ],
     )

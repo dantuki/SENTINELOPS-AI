@@ -9,6 +9,6 @@ def main() -> None:
     uvicorn.run(
         "sentinelops_ai_orchestrator.app:app",
         host="127.0.0.1",
-        port=8001,
+        port=8000,
         reload=False,
     )
