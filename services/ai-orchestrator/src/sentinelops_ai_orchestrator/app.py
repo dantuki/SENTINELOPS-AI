@@ -1,6 +1,6 @@
-
 """FastAPI application for the SentinelOps AI orchestrator."""
 
+import logging
 import os
 from collections.abc import Awaitable, Callable
 from typing import Literal
@@ -14,6 +14,8 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1536
 MAX_BATCH_SIZE = 32
 MAX_TEXT_CHARS = 20_000
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class HealthResponse(BaseModel):
@@ -122,21 +124,52 @@ async def generate_embeddings(
                 encoding_format="float",
             )
     except OpenAIError as exc:
+        # Log only diagnostic metadata. Never log keys or input text.
+        logger.error(
+            "Embedding provider request failed: type=%s status_code=%s "
+            "request_id=%s",
+            type(exc).__name__,
+            getattr(exc, "status_code", None),
+            getattr(exc, "request_id", None),
+        )
         raise EmbeddingProviderRequestError from exc
 
     items = sorted(response.data, key=lambda item: item.index)
 
     if len(items) != len(texts):
+        logger.error(
+            "Embedding provider returned an unexpected item count: "
+            "expected=%s received=%s",
+            len(texts),
+            len(items),
+        )
         raise EmbeddingProviderRequestError
+
+    vectors: list[list[float]] = []
 
     for expected_index, item in enumerate(items):
         if (
             item.index != expected_index
             or len(item.embedding) != EMBEDDING_DIMENSIONS
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and __import__("math").isfinite(value)
+                for value in item.embedding
+            )
         ):
+            logger.error(
+                "Embedding provider returned an invalid vector: "
+                "item_index=%s expected_index=%s dimensions=%s",
+                item.index,
+                expected_index,
+                len(item.embedding),
+            )
             raise EmbeddingProviderRequestError
 
-    return response.model, [item.embedding for item in items]
+        vectors.append(item.embedding)
+
+    return response.model, vectors
 
 
 def get_embedding_generator() -> EmbeddingGenerator:
@@ -171,6 +204,7 @@ async def create_embeddings(
     if len(vectors) != len(payload.texts) or any(
         len(vector) != EMBEDDING_DIMENSIONS for vector in vectors
     ):
+        logger.error("Embedding generator returned invalid vector dimensions.")
         raise HTTPException(
             status_code=502,
             detail="Embedding provider returned an invalid response.",
