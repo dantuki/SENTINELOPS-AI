@@ -447,4 +447,4 @@ Este repositorio todavía no tiene una licencia especificada. Hasta que se incor
 
 ---
 
-**SentinelOps AI — Evidencia antes que suposiciones.**
+
