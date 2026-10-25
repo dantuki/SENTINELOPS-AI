@@ -1,4 +1,3 @@
-
 """Tests for the SentinelOps AI orchestrator API."""
 
 from collections.abc import AsyncIterator
@@ -10,8 +9,12 @@ from sentinelops_ai_orchestrator.app import (
     EMBEDDING_DIMENSIONS,
     EMBEDDING_MODEL,
     EmbeddingProviderRequestError,
+    LocalModelResponseError,
+    LocalModelTimeout,
+    LocalModelUnavailable,
     app,
     get_embedding_generator,
+    get_local_chat_generator,
 )
 
 
@@ -148,4 +151,108 @@ def test_embeddings_returns_502_when_provider_fails() -> None:
     assert response.status_code == 502
     assert response.json() == {
         "detail": "Embedding provider request failed."
+    }
+
+
+def test_openapi_documentation_contains_chat_endpoint() -> None:
+    """The OpenAPI document must include the local chat route."""
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+
+    openapi_document = response.json()
+    assert "/chat" in openapi_document["paths"]
+    assert "post" in openapi_document["paths"]["/chat"]
+
+
+def test_chat_returns_response_from_local_model() -> None:
+    """Chat generation can be tested without running Ollama."""
+
+    async def fake_generator(prompt: str) -> tuple[str, str]:
+        assert prompt == "Investiga un error HTTP 503."
+        return "qwen3.5:4b", "Revisaría primero los logs."
+
+    app.dependency_overrides[get_local_chat_generator] = (
+        lambda: fake_generator
+    )
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga un error HTTP 503."},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model": "qwen3.5:4b",
+        "response": "Revisaría primero los logs.",
+    }
+
+
+def test_chat_rejects_blank_prompt() -> None:
+    """Blank prompts must be rejected before invoking Ollama."""
+    response = client.post("/chat", json={"prompt": "   "})
+
+    assert response.status_code == 422
+
+
+def test_chat_returns_503_when_local_model_is_unavailable() -> None:
+    """Connection failures must not expose internal details."""
+
+    async def unavailable_generator(prompt: str) -> tuple[str, str]:
+        raise LocalModelUnavailable
+
+    app.dependency_overrides[get_local_chat_generator] = (
+        lambda: unavailable_generator
+    )
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga un error HTTP 503."},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Local model service is unavailable."
+    }
+
+
+def test_chat_returns_504_when_local_model_times_out() -> None:
+    """Model timeouts must be returned as gateway timeouts."""
+
+    async def timeout_generator(prompt: str) -> tuple[str, str]:
+        raise LocalModelTimeout
+
+    app.dependency_overrides[get_local_chat_generator] = (
+        lambda: timeout_generator
+    )
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga un error HTTP 503."},
+    )
+
+    assert response.status_code == 504
+    assert response.json() == {
+        "detail": "Local model request timed out."
+    }
+
+
+def test_chat_returns_502_for_invalid_model_response() -> None:
+    """Invalid model responses must not leak provider details."""
+
+    async def invalid_generator(prompt: str) -> tuple[str, str]:
+        raise LocalModelResponseError
+
+    app.dependency_overrides[get_local_chat_generator] = (
+        lambda: invalid_generator
+    )
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga un error HTTP 503."},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Local model returned an invalid response."
     }

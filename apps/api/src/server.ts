@@ -1,15 +1,15 @@
-
 import { Pool } from "pg";
-import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { buildApp } from "./app.js";
-import { DocumentRepository } from "./document-repository.js";
-import { registerDocumentRoutes } from "./document-routes.js";
+import { registerChatRoutes } from "./chat-routes.js";
 import { DocumentChunkRepository } from "./chunk-repository.js";
 import { registerChunkRoutes } from "./chunk-routes.js";
-import { ProductRepository } from "./product-repository.js";
+import { registerDocumentRoutes } from "./document-routes.js";
+import { DocumentRepository } from "./document-repository.js";
+import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
-import { ProjectSourceRepository } from "./source-repository.js";
+import { ProductRepository } from "./product-repository.js";
 import { registerSourceRoutes } from "./source-routes.js";
+import { ProjectSourceRepository } from "./source-repository.js";
 
 function createPostgresPool(): Pool | undefined {
   const database = process.env.POSTGRES_DB;
@@ -80,11 +80,12 @@ async function main(): Promise<void> {
     ? new DocumentChunkRepository(postgresPool)
     : undefined;
 
-registerProductRoutes(app, productRepository);
-registerSourceRoutes(app, sourceRepository);
-registerDocumentRoutes(app, documentRepository);
-registerChunkRoutes(app, chunkRepository);
-registerEmbeddingRoutes(app, chunkRepository);;
+  registerProductRoutes(app, productRepository);
+  registerSourceRoutes(app, sourceRepository);
+  registerDocumentRoutes(app, documentRepository);
+  registerChunkRoutes(app, chunkRepository);
+  registerEmbeddingRoutes(app, chunkRepository);
+  registerChatRoutes(app);
 
   postgresPool?.on("error", () => {
     app.log.error("Unexpected PostgreSQL pool error");
