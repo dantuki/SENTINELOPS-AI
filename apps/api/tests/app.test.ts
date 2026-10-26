@@ -10,8 +10,10 @@ import type {
   PendingEmbeddingChunk,
   SemanticSearchChunkRecord,
 } from "../src/chunk-repository.js";
+import { registerChatRoutes } from "../src/chat-routes.js";
 import { registerChunkRoutes } from "../src/chunk-routes.js";
 import { registerEmbeddingRoutes } from "../src/embedding-routes.js";
+
 import type {
   CreateDocumentInput,
   DocumentRecord,
@@ -1473,4 +1475,142 @@ test("POST project search rejects blank query and out-of-range limit", async () 
 
   assert.equal(blankQuery.statusCode, 400);
   assert.equal(excessiveLimit.statusCode, 400);
+});
+test("POST /api/chat forwards the prompt to the AI orchestrator", async () => {
+  let requestedUrl = "";
+  let requestedPrompt = "";
+
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input, init) => {
+      requestedUrl = String(input);
+
+      const body = JSON.parse(String(init?.body)) as {
+        prompt: string;
+      };
+
+      requestedPrompt = body.prompt;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "Revisaría los logs del servicio.",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: {
+      prompt: "Investiga un error HTTP 503.",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(requestedUrl, "http://127.0.0.1:8001/chat");
+  assert.equal(requestedPrompt, "Investiga un error HTTP 503.");
+
+  assert.deepEqual(response.json(), {
+    model: "qwen3.5:4b",
+    response: "Revisaría los logs del servicio.",
+  });
+});
+
+test("POST /api/chat rejects a blank prompt", async () => {
+  let upstreamCalled = false;
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      upstreamCalled = true;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "Respuesta",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "   " },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(response.json(), {
+    error: "Prompt must not be empty",
+  });
+  assert.equal(upstreamCalled, false);
+});
+
+test("POST /api/chat returns 503 when the orchestrator is unavailable", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      throw new Error("private connection details");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "AI service unavailable",
+  });
+  assert.equal(
+    response.body.includes("private connection details"),
+    false,
+  );
+});
+
+test("POST /api/chat returns 504 when the orchestrator times out", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      throw new DOMException("Request timed out", "TimeoutError");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.deepEqual(response.json(), {
+    error: "AI model timed out",
+  });
+});
+
+test("POST /api/chat returns 502 for an invalid model response", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () =>
+      Response.json({
+        model: "qwen3.5:4b",
+        response: "",
+      }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "Invalid AI model response",
+  });
 });
