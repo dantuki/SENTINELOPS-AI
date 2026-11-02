@@ -1,14 +1,19 @@
 """Tests for the SentinelOps AI orchestrator API."""
 
+import asyncio
 from collections.abc import AsyncIterator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import sentinelops_ai_orchestrator.app as orchestrator
 from sentinelops_ai_orchestrator.app import (
     EMBEDDING_DIMENSIONS,
     EMBEDDING_MODEL,
     EmbeddingProviderRequestError,
+    EmbeddingProviderTimeout,
+    EmbeddingProviderUnavailable,
     LocalModelResponseError,
     LocalModelTimeout,
     LocalModelUnavailable,
@@ -21,6 +26,62 @@ from sentinelops_ai_orchestrator.app import (
 client = TestClient(app)
 
 
+class FakeOllamaResponse:
+    """Mock response returned by the Ollama HTTP API."""
+
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> object:
+        return self.payload
+
+
+class FakeOllamaAsyncClient:
+    """Mock asynchronous HTTP client used by unit tests."""
+
+    def __init__(
+        self,
+        response: FakeOllamaResponse | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.request_url = ""
+        self.request_json: dict[str, object] = {}
+        self.timeout: float | None = None
+
+    async def __aenter__(self) -> "FakeOllamaAsyncClient":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        return None
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, object],
+    ) -> FakeOllamaResponse:
+        self.request_url = url
+        self.request_json = json
+
+        if self.error is not None:
+            raise self.error
+
+        if self.response is None:
+            raise AssertionError("A mock response was not configured.")
+
+        return self.response
+
+
 @pytest.fixture(autouse=True)
 def clear_dependency_overrides() -> AsyncIterator[None]:
     """Ensure one test's dependency overrides do not affect another."""
@@ -30,7 +91,6 @@ def clear_dependency_overrides() -> AsyncIterator[None]:
 
 
 def test_health_endpoint_returns_expected_payload() -> None:
-    """The health endpoint must return the documented response."""
     response = client.get("/health")
 
     assert response.status_code == 200
@@ -40,31 +100,167 @@ def test_health_endpoint_returns_expected_payload() -> None:
     }
 
 
-def test_openapi_documentation_contains_health_endpoint() -> None:
-    """The OpenAPI document must include the health route."""
+def test_openapi_contains_health_embeddings_and_chat() -> None:
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
 
-    openapi_document = response.json()
-    assert "/health" in openapi_document["paths"]
-    assert "get" in openapi_document["paths"]["/health"]
+    paths = response.json()["paths"]
+
+    assert "get" in paths["/health"]
+    assert "post" in paths["/embeddings"]
+    assert "post" in paths["/chat"]
 
 
-def test_openapi_documentation_contains_embeddings_endpoint() -> None:
-    """The OpenAPI document must include the embeddings route."""
-    response = client.get("/openapi.json")
+def test_generate_embeddings_uses_local_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    texts = [
+        "La API presenta latencia elevada.",
+        "El servicio de autenticación no responde.",
+    ]
 
-    assert response.status_code == 200
+    expected_vectors = [
+        [0.1] * EMBEDDING_DIMENSIONS,
+        [0.2] * EMBEDDING_DIMENSIONS,
+    ]
 
-    openapi_document = response.json()
-    assert "/embeddings" in openapi_document["paths"]
-    assert "post" in openapi_document["paths"]["/embeddings"]
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": EMBEDDING_MODEL,
+                "embeddings": expected_vectors,
+            }
+        )
+    )
+
+    def fake_client_factory(
+        *,
+        timeout: float,
+    ) -> FakeOllamaAsyncClient:
+        mock_client.timeout = timeout
+        return mock_client
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        fake_client_factory,
+    )
+    monkeypatch.setenv(
+        "OLLAMA_BASE_URL",
+        "http://127.0.0.1:11434/",
+    )
+    monkeypatch.setenv(
+        "OLLAMA_EMBEDDING_MODEL",
+        EMBEDDING_MODEL,
+    )
+
+    model, vectors = asyncio.run(
+        orchestrator.generate_embeddings(texts)
+    )
+
+    assert model == EMBEDDING_MODEL
+    assert vectors == expected_vectors
+    assert mock_client.request_url == (
+        "http://127.0.0.1:11434/api/embed"
+    )
+    assert mock_client.request_json == {
+        "model": EMBEDDING_MODEL,
+        "input": texts,
+    }
+    assert mock_client.timeout == 30.0
+
+
+def test_generate_embeddings_rejects_wrong_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": EMBEDDING_MODEL,
+                "embeddings": [[0.1, 0.2, 0.3]],
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kwargs: mock_client,
+    )
+
+    with pytest.raises(EmbeddingProviderRequestError):
+        asyncio.run(
+            orchestrator.generate_embeddings(["Texto de prueba"])
+        )
+
+
+def test_generate_embeddings_rejects_non_finite_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_vector = [0.1] * EMBEDDING_DIMENSIONS
+    invalid_vector[0] = float("nan")
+
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": EMBEDDING_MODEL,
+                "embeddings": [invalid_vector],
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kwargs: mock_client,
+    )
+
+    with pytest.raises(EmbeddingProviderRequestError):
+        asyncio.run(
+            orchestrator.generate_embeddings(["Texto de prueba"])
+        )
+
+
+def test_generate_embeddings_maps_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        error=httpx.TimeoutException("simulated timeout")
+    )
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kwargs: mock_client,
+    )
+
+    with pytest.raises(EmbeddingProviderTimeout):
+        asyncio.run(
+            orchestrator.generate_embeddings(["Texto de prueba"])
+        )
+
+
+def test_generate_embeddings_maps_connection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        error=httpx.ConnectError("simulated connection failure")
+    )
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda **kwargs: mock_client,
+    )
+
+    with pytest.raises(EmbeddingProviderUnavailable):
+        asyncio.run(
+            orchestrator.generate_embeddings(["Texto de prueba"])
+        )
 
 
 def test_embeddings_returns_vectors_for_each_text() -> None:
-    """Embedding generation can be tested without contacting OpenAI."""
-
     async def fake_generator(
         texts: list[str],
     ) -> tuple[str, list[list[float]]]:
@@ -91,49 +287,80 @@ def test_embeddings_returns_vectors_for_each_text() -> None:
     assert response.status_code == 200
 
     payload = response.json()
+
     assert payload["model"] == EMBEDDING_MODEL
     assert payload["dimensions"] == EMBEDDING_DIMENSIONS
     assert len(payload["data"]) == 2
     assert payload["data"][0]["index"] == 0
     assert payload["data"][1]["index"] == 1
-    assert len(payload["data"][0]["embedding"]) == EMBEDDING_DIMENSIONS
-    assert len(payload["data"][1]["embedding"]) == EMBEDDING_DIMENSIONS
+    assert (
+        len(payload["data"][0]["embedding"])
+        == EMBEDDING_DIMENSIONS
+    )
+    assert (
+        len(payload["data"][1]["embedding"])
+        == EMBEDDING_DIMENSIONS
+    )
 
 
 def test_embeddings_rejects_empty_text_list() -> None:
-    """At least one text is required."""
     response = client.post("/embeddings", json={"texts": []})
 
     assert response.status_code == 422
 
 
 def test_embeddings_rejects_blank_text() -> None:
-    """Blank input should be rejected before invoking the provider."""
-    response = client.post("/embeddings", json={"texts": ["   "]})
+    response = client.post(
+        "/embeddings",
+        json={"texts": ["   "]},
+    )
 
     assert response.status_code == 422
 
 
-def test_embeddings_returns_503_without_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Missing provider configuration must produce a safe error."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_embeddings_returns_503_when_ollama_is_unavailable() -> None:
+    async def unavailable_generator(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        raise EmbeddingProviderUnavailable
+
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: unavailable_generator
+    )
 
     response = client.post(
         "/embeddings",
-        json={"texts": ["Test de configuración"]},
+        json={"texts": ["Texto de prueba"]},
     )
 
     assert response.status_code == 503
     assert response.json() == {
-        "detail": "Embedding provider is not configured."
+        "detail": "Local embedding model service is unavailable."
+    }
+
+
+def test_embeddings_returns_504_when_ollama_times_out() -> None:
+    async def timeout_generator(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        raise EmbeddingProviderTimeout
+
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: timeout_generator
+    )
+
+    response = client.post(
+        "/embeddings",
+        json={"texts": ["Texto de prueba"]},
+    )
+
+    assert response.status_code == 504
+    assert response.json() == {
+        "detail": "Local embedding model request timed out."
     }
 
 
 def test_embeddings_returns_502_when_provider_fails() -> None:
-    """Provider failures must not expose internal error details."""
-
     async def failing_generator(
         texts: list[str],
     ) -> tuple[str, list[list[float]]]:
@@ -150,24 +377,29 @@ def test_embeddings_returns_502_when_provider_fails() -> None:
 
     assert response.status_code == 502
     assert response.json() == {
-        "detail": "Embedding provider request failed."
+        "detail": "Local embedding model returned an invalid response."
     }
 
 
-def test_openapi_documentation_contains_chat_endpoint() -> None:
-    """The OpenAPI document must include the local chat route."""
-    response = client.get("/openapi.json")
+def test_embeddings_rejects_invalid_generator_contract() -> None:
+    async def invalid_generator(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        return EMBEDDING_MODEL, [[0.1, 0.2]]
 
-    assert response.status_code == 200
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: invalid_generator
+    )
 
-    openapi_document = response.json()
-    assert "/chat" in openapi_document["paths"]
-    assert "post" in openapi_document["paths"]["/chat"]
+    response = client.post(
+        "/embeddings",
+        json={"texts": ["Texto de prueba"]},
+    )
+
+    assert response.status_code == 502
 
 
 def test_chat_returns_response_from_local_model() -> None:
-    """Chat generation can be tested without running Ollama."""
-
     async def fake_generator(prompt: str) -> tuple[str, str]:
         assert prompt == "Investiga un error HTTP 503."
         return "qwen3.5:4b", "Revisaría primero los logs."
@@ -189,15 +421,15 @@ def test_chat_returns_response_from_local_model() -> None:
 
 
 def test_chat_rejects_blank_prompt() -> None:
-    """Blank prompts must be rejected before invoking Ollama."""
-    response = client.post("/chat", json={"prompt": "   "})
+    response = client.post(
+        "/chat",
+        json={"prompt": "   "},
+    )
 
     assert response.status_code == 422
 
 
 def test_chat_returns_503_when_local_model_is_unavailable() -> None:
-    """Connection failures must not expose internal details."""
-
     async def unavailable_generator(prompt: str) -> tuple[str, str]:
         raise LocalModelUnavailable
 
@@ -217,8 +449,6 @@ def test_chat_returns_503_when_local_model_is_unavailable() -> None:
 
 
 def test_chat_returns_504_when_local_model_times_out() -> None:
-    """Model timeouts must be returned as gateway timeouts."""
-
     async def timeout_generator(prompt: str) -> tuple[str, str]:
         raise LocalModelTimeout
 
@@ -238,8 +468,6 @@ def test_chat_returns_504_when_local_model_times_out() -> None:
 
 
 def test_chat_returns_502_for_invalid_model_response() -> None:
-    """Invalid model responses must not leak provider details."""
-
     async def invalid_generator(prompt: str) -> tuple[str, str]:
         raise LocalModelResponseError
 

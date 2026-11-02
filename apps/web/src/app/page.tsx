@@ -103,6 +103,7 @@ export default function Home() {
           </a>
 
           <nav className="nav-links" aria-label="Navegación principal">
+            <a href="/investigation">Investigation Workspace</a>
             <a href="#principios">Principios</a>
             <a href="#flujo">Flujo de trabajo</a>
             <a href="#arquitectura">Arquitectura</a>
@@ -133,8 +134,11 @@ export default function Home() {
             </p>
 
             <div className="hero-actions">
-              <a className="action-link action-primary" href="#flujo">
-                Explorar el flujo
+              <a
+                className="action-link action-primary"
+                href="/investigation"
+              >
+                Abrir Investigation Workspace
                 <span aria-hidden="true">↗</span>
               </a>
 

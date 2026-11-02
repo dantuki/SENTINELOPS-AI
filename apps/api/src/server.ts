@@ -6,6 +6,7 @@ import { registerChunkRoutes } from "./chunk-routes.js";
 import { registerDocumentRoutes } from "./document-routes.js";
 import { DocumentRepository } from "./document-repository.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
+import { registerInvestigationRoutes } from "./investigation-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerSourceRoutes } from "./source-routes.js";
@@ -85,6 +86,7 @@ async function main(): Promise<void> {
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);
   registerEmbeddingRoutes(app, chunkRepository);
+  registerInvestigationRoutes(app, chunkRepository);
   registerChatRoutes(app);
 
   postgresPool?.on("error", () => {

@@ -8,7 +8,7 @@ import {
   type SemanticSearchChunkRecord,
 } from "./chunk-repository.js";
 
-const EMBEDDING_DIMENSIONS = 1536;
+const EMBEDDING_DIMENSIONS = 1024;
 const EMBEDDING_BATCH_SIZE = 32;
 const MAX_TEXT_CHARS = 20000;
 const DEFAULT_SEARCH_LIMIT = 5;

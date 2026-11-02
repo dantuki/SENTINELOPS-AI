@@ -1,7 +1,7 @@
 
 import type { Pool } from "pg";
 
-const EMBEDDING_DIMENSIONS = 1536;
+const EMBEDDING_DIMENSIONS = 1024;
 
 export interface DocumentChunkRecord {
   id: string;
@@ -304,6 +304,7 @@ export class DocumentChunkRepository {
     projectId: string,
     embedding: number[],
     limit = 5,
+    incidentId?: string,
   ): Promise<SemanticSearchChunkRecord[] | null> {
     const vector = toVectorSql(embedding);
 
@@ -332,10 +333,19 @@ export class DocumentChunkRepository {
         FROM document_chunks
         WHERE project_id = $1::uuid
           AND embedding IS NOT NULL
+          AND (
+            $4::text IS NULL
+            OR metadata ->> 'incidentId' = $4::text
+          )
         ORDER BY embedding <=> $2::vector ASC
         LIMIT $3
       `,
-      [projectId, vector, limit],
+      [
+        projectId,
+        vector,
+        limit,
+        incidentId ?? null,
+      ],
     );
 
     return result.rows.map((row) => ({
