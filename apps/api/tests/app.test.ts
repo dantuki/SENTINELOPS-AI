@@ -1,9 +1,36 @@
-
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import type { FastifyInstance } from "fastify";
-
+import { registerInvestigationRoutes } from "../src/investigation-routes.js";
 import { buildApp } from "../src/app.js";
+import type {
+  ChunkEmbeddingInput,
+  CreateDocumentChunkInput,
+  DocumentChunkRecord,
+  PendingEmbeddingChunk,
+  SemanticSearchChunkRecord,
+} from "../src/chunk-repository.js";
+import { registerChatRoutes } from "../src/chat-routes.js";
+import { registerChunkRoutes } from "../src/chunk-routes.js";
+import { registerEmbeddingRoutes } from "../src/embedding-routes.js";
+
+import type {
+  CreateDocumentInput,
+  DocumentRecord,
+} from "../src/document-repository.js";
+import { registerDocumentRoutes } from "../src/document-routes.js";
+import type {
+  IncidentRecord,
+  ProductStore,
+  ProjectRecord,
+  WorkspaceRecord,
+} from "../src/product-repository.js";
+import { registerProductRoutes } from "../src/product-routes.js";
+import type {
+  CreateProjectSourceInput,
+  ProjectSourceRecord,
+} from "../src/source-repository.js";
+import { registerSourceRoutes } from "../src/source-routes.js";
 
 const apps: FastifyInstance[] = [];
 
@@ -268,4 +295,1567 @@ test("PostgreSQL dependency returns 503 when no health check is configured", asy
     },
     message: "PostgreSQL unavailable",
   });
+});
+
+const repositoryTestDate = new Date("2026-01-01T00:00:00.000Z");
+
+const repositoryTestWorkspace: WorkspaceRecord = {
+  id: "11111111-1111-4111-8111-111111111111",
+  slug: "sentinelops-team",
+  name: "SentinelOps Team",
+  status: "active",
+  createdAt: repositoryTestDate,
+  updatedAt: repositoryTestDate,
+};
+
+const repositoryTestProject: ProjectRecord = {
+  id: "22222222-2222-4222-8222-222222222222",
+  workspaceId: repositoryTestWorkspace.id,
+  slug: "incident-platform",
+  name: "Incident Platform",
+  description: "Proyecto de prueba",
+  status: "active",
+  settings: {},
+  createdAt: repositoryTestDate,
+  updatedAt: repositoryTestDate,
+};
+
+const repositoryTestIncident: IncidentRecord = {
+  id: "33333333-3333-4333-8333-333333333333",
+  projectId: repositoryTestProject.id,
+  externalReference: null,
+  title: "API response latency",
+  description: "Elevated response time",
+  serviceName: "product-api",
+  severity: "high",
+  status: "new",
+  context: {},
+  createdAt: repositoryTestDate,
+  updatedAt: repositoryTestDate,
+};
+
+function createFakeProductStore(
+  overrides: Partial<ProductStore> = {},
+): ProductStore {
+  const store: ProductStore = {
+    listWorkspaces: async () => [repositoryTestWorkspace],
+
+    createWorkspace: async (input) => ({
+      ...repositoryTestWorkspace,
+      slug: input.slug,
+      name: input.name,
+    }),
+
+    listProjects: async (workspaceId) =>
+      workspaceId === repositoryTestWorkspace.id
+        ? [repositoryTestProject]
+        : null,
+
+    createProject: async (workspaceId, input) =>
+      workspaceId === repositoryTestWorkspace.id
+        ? {
+            ...repositoryTestProject,
+            workspaceId,
+            slug: input.slug,
+            name: input.name,
+            description: input.description ?? null,
+          }
+        : null,
+
+    listIncidents: async (projectId) =>
+      projectId === repositoryTestProject.id
+        ? [repositoryTestIncident]
+        : null,
+
+    createIncident: async (projectId, input) =>
+      projectId === repositoryTestProject.id
+        ? {
+            ...repositoryTestIncident,
+            projectId,
+            externalReference: input.externalReference ?? null,
+            title: input.title,
+            description: input.description ?? null,
+            serviceName: input.serviceName ?? null,
+            severity: input.severity,
+            context: input.context ?? {},
+          }
+        : null,
+  };
+
+  return { ...store, ...overrides };
+}
+
+test("GET /api/workspaces returns workspace records", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/workspaces",
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    response.json().data[0].slug,
+    repositoryTestWorkspace.slug,
+  );
+});
+
+test("POST /api/workspaces creates a workspace", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/workspaces",
+    payload: {
+      slug: "new-team",
+      name: "New Team",
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.json().data.slug, "new-team");
+  assert.equal(response.json().data.name, "New Team");
+});
+
+test("POST /api/workspaces rejects an invalid slug", async () => {
+  let createCalled = false;
+
+  const store = createFakeProductStore({
+    createWorkspace: async () => {
+      createCalled = true;
+      return repositoryTestWorkspace;
+    },
+  });
+
+  const app = createTestApp();
+  registerProductRoutes(app, store);
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/workspaces",
+    payload: {
+      slug: "Invalid Slug",
+      name: "Invalid Workspace",
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(createCalled, false);
+});
+
+test("GET /api/workspaces/:workspaceId/projects returns projects", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/workspaces/${repositoryTestWorkspace.id}/projects`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    response.json().data[0].id,
+    repositoryTestProject.id,
+  );
+});
+
+test("GET projects returns 404 when the workspace does not exist", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/projects",
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Workspace not found",
+  });
+});
+
+test("POST /api/workspaces/:workspaceId/projects creates a project", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/workspaces/${repositoryTestWorkspace.id}/projects`,
+    payload: {
+      slug: "new-project",
+      name: "New Project",
+      description: "Created in a route test",
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(
+    response.json().data.workspaceId,
+    repositoryTestWorkspace.id,
+  );
+  assert.equal(response.json().data.slug, "new-project");
+});
+
+test("POST /api/projects/:projectId/incidents creates an incident", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app, createFakeProductStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${repositoryTestProject.id}/incidents`,
+    payload: {
+      title: "Database latency",
+      description: "Latency increased during the test",
+      serviceName: "product-api",
+      severity: "high",
+      context: {
+        environment: "test",
+      },
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.json().data.projectId, repositoryTestProject.id);
+  assert.equal(response.json().data.title, "Database latency");
+  assert.equal(response.json().data.severity, "high");
+});
+
+test("Product routes return 503 when persistence is not configured", async () => {
+  const app = createTestApp();
+  registerProductRoutes(app);
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/workspaces",
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+const sourceTestDate = new Date("2026-01-01T00:00:00.000Z");
+
+const sourceTestProjectId = "22222222-2222-4222-8222-222222222222";
+
+const sourceTestRecord: ProjectSourceRecord = {
+  id: "44444444-4444-4444-8444-444444444444",
+  projectId: sourceTestProjectId,
+  sourceType: "git_repository",
+  name: "SentinelOps repository",
+  locator: "https://example.com/sentinelops.git",
+  status: "pending",
+  metadata: {},
+  createdAt: sourceTestDate,
+  updatedAt: sourceTestDate,
+};
+
+function createFakeSourceStore(
+  overrides: {
+    listForProject?: (
+      projectId: string,
+    ) => Promise<ProjectSourceRecord[] | null>;
+    createForProject?: (
+      projectId: string,
+      input: CreateProjectSourceInput,
+    ) => Promise<ProjectSourceRecord | null>;
+  } = {},
+) {
+  return {
+    listForProject:
+      overrides.listForProject ??
+      (async (projectId: string) =>
+        projectId === sourceTestProjectId ? [sourceTestRecord] : null),
+
+    createForProject:
+      overrides.createForProject ??
+      (async (projectId: string, input: CreateProjectSourceInput) =>
+        projectId === sourceTestProjectId
+          ? {
+              ...sourceTestRecord,
+              projectId,
+              sourceType: input.sourceType,
+              name: input.name,
+              locator: input.locator,
+              metadata: input.metadata ?? {},
+            }
+          : null),
+  };
+}
+
+test("GET /api/projects/:projectId/sources returns project sources", async () => {
+  const app = createTestApp();
+  registerSourceRoutes(app, createFakeSourceStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/sources`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().data.length, 1);
+  assert.equal(
+    response.json().data[0].sourceType,
+    "git_repository",
+  );
+  assert.equal(
+    response.json().data[0].projectId,
+    sourceTestProjectId,
+  );
+});
+
+test("POST /api/projects/:projectId/sources creates a source", async () => {
+  const app = createTestApp();
+  registerSourceRoutes(app, createFakeSourceStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/sources`,
+    payload: {
+      sourceType: "git_repository",
+      name: "SentinelOps repository",
+      locator: "https://example.com/sentinelops.git",
+      metadata: {
+        branch: "main",
+      },
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(
+    response.json().data.sourceType,
+    "git_repository",
+  );
+  assert.equal(
+    response.json().data.locator,
+    "https://example.com/sentinelops.git",
+  );
+  assert.equal(response.json().data.metadata.branch, "main");
+});
+
+test("POST project source rejects an unsupported source type", async () => {
+  let createCalled = false;
+
+  const store = createFakeSourceStore({
+    createForProject: async () => {
+      createCalled = true;
+      return sourceTestRecord;
+    },
+  });
+
+  const app = createTestApp();
+  registerSourceRoutes(app, store);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/sources`,
+    payload: {
+      sourceType: "arbitrary_source",
+      name: "Invalid source",
+      locator: "https://example.com/source",
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(createCalled, false);
+});
+
+test("GET project sources returns 404 when the project does not exist", async () => {
+  const app = createTestApp();
+  registerSourceRoutes(app, createFakeSourceStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/sources",
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Project not found",
+  });
+});
+
+test("POST project source returns 409 for a duplicate source", async () => {
+  const app = createTestApp();
+
+  registerSourceRoutes(
+    app,
+    createFakeSourceStore({
+      createForProject: async () => {
+        throw Object.assign(
+          new Error("duplicate key details"),
+          { code: "23505" },
+        );
+      },
+    }),
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/sources`,
+    payload: {
+      sourceType: "git_repository",
+      name: "SentinelOps repository",
+      locator: "https://example.com/sentinelops.git",
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.deepEqual(response.json(), {
+    error: "Source already exists for this project and type",
+  });
+  assert.equal(response.body.includes("duplicate key details"), false);
+});
+
+test("Project source routes return 503 when persistence is unavailable", async () => {
+  const app = createTestApp();
+  registerSourceRoutes(app);
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/sources`,
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+const documentTestDate = new Date("2026-01-01T00:00:00.000Z");
+
+const documentTestRecord: DocumentRecord = {
+  id: "55555555-5555-4555-8555-555555555555",
+  projectId: sourceTestProjectId,
+  sourceId: sourceTestRecord.id,
+  sourceDocumentKey: "README.md",
+  title: "README.md",
+  mediaType: "text/markdown",
+  contentSha256: "a".repeat(64),
+  status: "discovered",
+  metadata: {
+    format: "markdown",
+  },
+  createdAt: documentTestDate,
+  updatedAt: documentTestDate,
+};
+
+function createFakeDocumentStore(
+  overrides: {
+    listForProject?: (
+      projectId: string,
+    ) => Promise<DocumentRecord[] | null>;
+    createForProject?: (
+      projectId: string,
+      input: CreateDocumentInput,
+    ) => Promise<DocumentRecord | null>;
+  } = {},
+) {
+  return {
+    listForProject:
+      overrides.listForProject ??
+      (async (projectId: string) =>
+        projectId === sourceTestProjectId
+          ? [documentTestRecord]
+          : null),
+
+    createForProject:
+      overrides.createForProject ??
+      (async (projectId: string, input: CreateDocumentInput) =>
+        projectId === sourceTestProjectId &&
+        input.sourceId === sourceTestRecord.id
+          ? {
+              ...documentTestRecord,
+              projectId,
+              sourceId: input.sourceId,
+              sourceDocumentKey: input.sourceDocumentKey ?? null,
+              title: input.title,
+              mediaType: input.mediaType ?? null,
+              contentSha256: input.contentSha256 ?? null,
+              metadata: input.metadata ?? {},
+            }
+          : null),
+  };
+}
+
+test("GET /api/projects/:projectId/documents returns project documents", async () => {
+  const app = createTestApp();
+  registerDocumentRoutes(app, createFakeDocumentStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().data.length, 1);
+  assert.equal(response.json().data[0].title, "README.md");
+  assert.equal(
+    response.json().data[0].sourceId,
+    sourceTestRecord.id,
+  );
+});
+
+test("POST /api/projects/:projectId/documents creates a document", async () => {
+  const app = createTestApp();
+  registerDocumentRoutes(app, createFakeDocumentStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+    payload: {
+      sourceId: sourceTestRecord.id,
+      sourceDocumentKey: "README.md",
+      title: "README.md",
+      mediaType: "text/markdown",
+      contentSha256: "a".repeat(64),
+      extractedText: "# SentinelOps AI\nDocumento de prueba.",
+      metadata: {
+        format: "markdown",
+      },
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.json().data.title, "README.md");
+  assert.equal(response.json().data.sourceId, sourceTestRecord.id);
+  assert.equal(response.json().data.status, "discovered");
+  assert.equal(
+    response.json().data.contentSha256,
+    "a".repeat(64),
+  );
+});
+
+test("POST document rejects an invalid SHA-256 hash", async () => {
+  let createCalled = false;
+
+  const store = createFakeDocumentStore({
+    createForProject: async () => {
+      createCalled = true;
+      return documentTestRecord;
+    },
+  });
+
+  const app = createTestApp();
+  registerDocumentRoutes(app, store);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+    payload: {
+      sourceId: sourceTestRecord.id,
+      title: "README.md",
+      contentSha256: "not-a-valid-hash",
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(createCalled, false);
+});
+
+test("GET project documents returns 404 when the project does not exist", async () => {
+  const app = createTestApp();
+  registerDocumentRoutes(app, createFakeDocumentStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/documents",
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Project not found",
+  });
+});
+
+test("POST document returns 404 when the source is not in the project", async () => {
+  const app = createTestApp();
+
+  registerDocumentRoutes(
+    app,
+    createFakeDocumentStore({
+      createForProject: async () => null,
+    }),
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+    payload: {
+      sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      title: "README.md",
+    },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Project or source not found in this project",
+  });
+});
+
+test("POST document returns 409 for a duplicate source document key", async () => {
+  const app = createTestApp();
+
+  registerDocumentRoutes(
+    app,
+    createFakeDocumentStore({
+      createForProject: async () => {
+        throw Object.assign(
+          new Error("private database constraint details"),
+          { code: "23505" },
+        );
+      },
+    }),
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+    payload: {
+      sourceId: sourceTestRecord.id,
+      sourceDocumentKey: "README.md",
+      title: "README.md",
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.deepEqual(response.json(), {
+    error: "Document key already exists for this source",
+  });
+  assert.equal(
+    response.body.includes("private database constraint details"),
+    false,
+  );
+});
+
+test("Document routes return 503 when persistence is unavailable", async () => {
+  const app = createTestApp();
+  registerDocumentRoutes(app);
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/documents`,
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+const chunkTestDate = new Date("2026-01-01T00:00:00.000Z");
+
+const chunkTestRecord: DocumentChunkRecord = {
+  id: "66666666-6666-4666-8666-666666666666",
+  projectId: sourceTestProjectId,
+  documentId: documentTestRecord.id,
+  ordinal: 0,
+  content: "Documento de prueba para fragmentación RAG.",
+  tokenCount: 7,
+  startOffset: 0,
+  endOffset: 45,
+  metadata: {
+    strategy: "test",
+  },
+  createdAt: chunkTestDate,
+};
+
+function createFakeChunkStore(
+  overrides: {
+    listForDocument?: (
+      projectId: string,
+      documentId: string,
+    ) => Promise<DocumentChunkRecord[] | null>;
+    createForDocument?: (
+      projectId: string,
+      documentId: string,
+      input: CreateDocumentChunkInput,
+    ) => Promise<DocumentChunkRecord | null>;
+  } = {},
+) {
+  return {
+    listForDocument:
+      overrides.listForDocument ??
+      (async (projectId: string, documentId: string) =>
+        projectId === sourceTestProjectId &&
+        documentId === documentTestRecord.id
+          ? [chunkTestRecord]
+          : null),
+
+    createForDocument:
+      overrides.createForDocument ??
+      (async (
+        projectId: string,
+        documentId: string,
+        input: CreateDocumentChunkInput,
+      ) =>
+        projectId === sourceTestProjectId &&
+        documentId === documentTestRecord.id
+          ? {
+              ...chunkTestRecord,
+              projectId,
+              documentId,
+              ordinal: input.ordinal,
+              content: input.content,
+              tokenCount: input.tokenCount ?? null,
+              startOffset: input.startOffset ?? null,
+              endOffset: input.endOffset ?? null,
+              metadata: input.metadata ?? {},
+            }
+          : null),
+  };
+}
+
+test("GET document chunks returns fragments in the document", async () => {
+  const app = createTestApp();
+  registerChunkRoutes(app, createFakeChunkStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().data.length, 1);
+  assert.equal(response.json().data[0].ordinal, 0);
+  assert.equal(
+    response.json().data[0].documentId,
+    documentTestRecord.id,
+  );
+});
+
+test("POST document chunks creates a fragment", async () => {
+  const app = createTestApp();
+  registerChunkRoutes(app, createFakeChunkStore());
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+    payload: {
+      ordinal: 1,
+      content: "Segundo fragmento para la prueba.",
+      tokenCount: 6,
+      startOffset: 45,
+      endOffset: 79,
+      metadata: {
+        strategy: "test",
+      },
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.json().data.ordinal, 1);
+  assert.equal(
+    response.json().data.content,
+    "Segundo fragmento para la prueba.",
+  );
+  assert.equal(response.json().data.startOffset, 45);
+  assert.equal(response.json().data.endOffset, 79);
+});
+
+test("POST document chunks rejects offsets when end is not greater than start", async () => {
+  let createCalled = false;
+
+  const store = createFakeChunkStore({
+    createForDocument: async () => {
+      createCalled = true;
+      return chunkTestRecord;
+    },
+  });
+
+  const app = createTestApp();
+  registerChunkRoutes(app, store);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+    payload: {
+      ordinal: 1,
+      content: "Invalid offsets",
+      startOffset: 20,
+      endOffset: 10,
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(createCalled, false);
+});
+
+test("POST document chunks rejects a negative ordinal and blank content", async () => {
+  const app = createTestApp();
+  registerChunkRoutes(app, createFakeChunkStore());
+
+  const negativeOrdinalResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+    payload: {
+      ordinal: -1,
+      content: "Valid content",
+    },
+  });
+
+  assert.equal(negativeOrdinalResponse.statusCode, 400);
+
+  const blankContentResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+    payload: {
+      ordinal: 2,
+      content: "   ",
+    },
+  });
+
+  assert.equal(blankContentResponse.statusCode, 400);
+});
+
+test("GET document chunks returns 404 when the document is not in the project", async () => {
+  const app = createTestApp();
+  registerChunkRoutes(app, createFakeChunkStore());
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/chunks`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Document not found in this project",
+  });
+});
+
+test("POST document chunks returns 409 for a duplicate ordinal", async () => {
+  const app = createTestApp();
+
+  registerChunkRoutes(
+    app,
+    createFakeChunkStore({
+      createForDocument: async () => {
+        throw Object.assign(
+          new Error("private database constraint details"),
+          { code: "23505" },
+        );
+      },
+    }),
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+    payload: {
+      ordinal: 0,
+      content: "Duplicate fragment",
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.deepEqual(response.json(), {
+    error: "Chunk ordinal already exists for this document",
+  });
+  assert.equal(
+    response.body.includes("private database constraint details"),
+    false,
+  );
+});
+
+test("Document chunk routes return 503 when persistence is unavailable", async () => {
+  const app = createTestApp();
+  registerChunkRoutes(app);
+
+  const response = await app.inject({
+    method: "GET",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/chunks`,
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+interface EmbeddingTestStore {
+  projectExists(projectId: string): Promise<boolean>;
+  listWithoutEmbeddingsForDocument(
+    projectId: string,
+    documentId: string,
+    limit?: number,
+  ): Promise<PendingEmbeddingChunk[] | null>;
+  saveEmbeddingsForDocument(
+    projectId: string,
+    documentId: string,
+    embeddings: ChunkEmbeddingInput[],
+  ): Promise<number | null>;
+  searchSimilarChunks(
+    projectId: string,
+    embedding: number[],
+    limit?: number,
+  ): Promise<SemanticSearchChunkRecord[] | null>;
+}
+
+function createFakeEmbeddingStore(
+  overrides: Partial<EmbeddingTestStore> = {},
+): EmbeddingTestStore {
+  return {
+    projectExists:
+      overrides.projectExists ??
+      (async (projectId) => projectId === sourceTestProjectId),
+
+    listWithoutEmbeddingsForDocument:
+      overrides.listWithoutEmbeddingsForDocument ??
+      (async (projectId, documentId) =>
+        projectId === sourceTestProjectId &&
+        documentId === documentTestRecord.id
+          ? [
+              {
+                id: chunkTestRecord.id,
+                ordinal: chunkTestRecord.ordinal,
+                content: chunkTestRecord.content,
+              },
+            ]
+          : null),
+
+    saveEmbeddingsForDocument:
+      overrides.saveEmbeddingsForDocument ??
+      (async (_projectId, _documentId, embeddings) => embeddings.length),
+
+    searchSimilarChunks:
+      overrides.searchSimilarChunks ??
+      (async (projectId) =>
+        projectId === sourceTestProjectId
+          ? [
+              {
+                id: chunkTestRecord.id,
+                projectId: sourceTestProjectId,
+                documentId: documentTestRecord.id,
+                ordinal: chunkTestRecord.ordinal,
+                content: chunkTestRecord.content,
+                score: 0.91,
+              },
+            ]
+          : null),
+  };
+}
+
+const fakeEmbeddingVector = (): number[] =>
+  Array.from({ length: 1024 }, () => 0.125);
+
+function fakeEmbeddingPayload(count: number): unknown {
+  return {
+    model: "qwen3-embedding:0.6b",
+    dimensions: 1024,
+    data: Array.from({ length: count }, (_, index) => ({
+      index,
+      embedding: fakeEmbeddingVector(),
+    })),
+  };
+}
+
+test("POST document embeddings generates and stores pending vectors", async () => {
+  let requestedUrl = "";
+  let requestedTexts: string[] = [];
+  let savedEmbeddings: ChunkEmbeddingInput[] = [];
+
+  const store = createFakeEmbeddingStore({
+    saveEmbeddingsForDocument: async (_projectId, _documentId, embeddings) => {
+      savedEmbeddings = embeddings;
+      return embeddings.length;
+    },
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    aiOrchestratorUrl: "http://127.0.0.1:8000",
+    fetchImpl: async (input, init) => {
+      requestedUrl = String(input);
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      requestedTexts = body.texts;
+      return Response.json(fakeEmbeddingPayload(body.texts.length));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(requestedUrl, "http://127.0.0.1:8000/embeddings");
+  assert.deepEqual(requestedTexts, [chunkTestRecord.content]);
+  assert.equal(response.json().data.processed, 1);
+  assert.equal(response.json().data.model, "qwen3-embedding:0.6b");
+  assert.equal(response.json().data.hasMore, false);
+  assert.equal(savedEmbeddings.length, 1);
+  assert.equal(savedEmbeddings[0]?.id, chunkTestRecord.id);
+  assert.equal(savedEmbeddings[0]?.embedding.length, 1024);
+  assert.equal(savedEmbeddings[0]?.model, "qwen3-embedding:0.6b");
+});
+
+test("POST document embeddings returns 404 when document is not in project", async () => {
+  let providerCalled = false;
+  const store = createFakeEmbeddingStore({
+    listWithoutEmbeddingsForDocument: async () => null,
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async () => {
+      providerCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Document not found in this project",
+  });
+  assert.equal(providerCalled, false);
+});
+
+test("POST document embeddings returns 503 when orchestrator is unavailable", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
+    fetchImpl: async () => {
+      throw new Error("private network failure details");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Embedding service unavailable",
+  });
+  assert.equal(response.body.includes("private network failure details"), false);
+});
+
+test("POST project search returns semantic results", async () => {
+  let requestedTexts: string[] = [];
+  let capturedLimit: number | undefined;
+
+  const store = createFakeEmbeddingStore({
+    searchSimilarChunks: async (_projectId, embedding, limit) => {
+      assert.equal(embedding.length, 1024);
+      capturedLimit = limit;
+      return [
+        {
+          id: chunkTestRecord.id,
+          projectId: sourceTestProjectId,
+          documentId: documentTestRecord.id,
+          ordinal: 0,
+          content: chunkTestRecord.content,
+          score: 0.91,
+        },
+      ];
+    },
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      requestedTexts = body.texts;
+      return Response.json(fakeEmbeddingPayload(body.texts.length));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: {
+      query: "¿Por qué presenta latencia la API?",
+      limit: 3,
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(requestedTexts, ["¿Por qué presenta latencia la API?"]);
+  assert.equal(capturedLimit, 3);
+  assert.equal(response.json().data.results.length, 1);
+  assert.equal(response.json().data.results[0].score, 0.91);
+  assert.equal(response.json().data.model, "qwen3-embedding:0.6b");
+});
+
+test("POST project search returns 404 before embedding unknown project", async () => {
+  let providerCalled = false;
+  const store = createFakeEmbeddingStore({
+    projectExists: async () => false,
+  });
+
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, store, {
+    fetchImpl: async () => {
+      providerCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/search`,
+    payload: { query: "consulta de prueba" },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), { error: "Project not found" });
+  assert.equal(providerCalled, false);
+});
+
+test("Embedding routes return 502 for invalid provider vector dimensions", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
+    fetchImpl: async () =>
+      Response.json({
+        model: "qwen3-embedding:0.6b",
+        dimensions: 1024,
+        data: [{ index: 0, embedding: [0.1, 0.2] }],
+      }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "Invalid embedding response",
+  });
+});
+
+test("Embedding routes return 503 when persistence is unavailable", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app);
+
+  const batchResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  const searchResponse = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "consulta de prueba" },
+  });
+
+  assert.equal(batchResponse.statusCode, 503);
+  assert.equal(searchResponse.statusCode, 503);
+  assert.deepEqual(batchResponse.json(), {
+    error: "Persistence unavailable",
+  });
+  assert.deepEqual(searchResponse.json(), {
+    error: "Persistence unavailable",
+  });
+});
+
+test("POST project search rejects blank query and out-of-range limit", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore());
+
+  const blankQuery = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "   " },
+  });
+
+  const excessiveLimit = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/search`,
+    payload: { query: "consulta válida", limit: 100 },
+  });
+
+  assert.equal(blankQuery.statusCode, 400);
+  assert.equal(excessiveLimit.statusCode, 400);
+});
+
+test("POST /api/chat forwards the prompt to the AI orchestrator", async () => {
+  let requestedUrl = "";
+  let requestedPrompt = "";
+
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input, init) => {
+      requestedUrl = String(input);
+
+      const body = JSON.parse(String(init?.body)) as {
+        prompt: string;
+      };
+
+      requestedPrompt = body.prompt;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "Revisaría los logs del servicio.",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: {
+      prompt: "Investiga un error HTTP 503.",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(requestedUrl, "http://127.0.0.1:8001/chat");
+  assert.equal(requestedPrompt, "Investiga un error HTTP 503.");
+
+  assert.deepEqual(response.json(), {
+    model: "qwen3.5:4b",
+    response: "Revisaría los logs del servicio.",
+  });
+});
+
+test("POST /api/chat rejects a blank prompt", async () => {
+  let upstreamCalled = false;
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      upstreamCalled = true;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "Respuesta",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "   " },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(response.json(), {
+    error: "Prompt must not be empty",
+  });
+  assert.equal(upstreamCalled, false);
+});
+
+test("POST /api/chat returns 503 when the orchestrator is unavailable", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      throw new Error("private connection details");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "AI service unavailable",
+  });
+  assert.equal(
+    response.body.includes("private connection details"),
+    false,
+  );
+});
+
+test("POST /api/chat returns 504 when the orchestrator times out", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () => {
+      throw new DOMException("Request timed out", "TimeoutError");
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.deepEqual(response.json(), {
+    error: "AI model timed out",
+  });
+});
+
+test("POST /api/chat returns 502 for an invalid model response", async () => {
+  const app = createTestApp();
+
+  registerChatRoutes(app, {
+    fetchImpl: async () =>
+      Response.json({
+        model: "qwen3.5:4b",
+        response: "",
+      }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/chat",
+    payload: { prompt: "Investiga un error HTTP 503." },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "Invalid AI model response",
+  });
+});test("POST project investigate combines retrieved evidence and model response", async () => {
+  const requestedUrls: string[] = [];
+  let requestedPrompt = "";
+
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      requestedUrls.push(url);
+
+      if (url.endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      const body = JSON.parse(String(init?.body)) as {
+        prompt: string;
+      };
+
+      requestedPrompt = body.prompt;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "El fragmento [E1] contiene la evidencia recuperada.",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+      limit: 3,
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+    "http://127.0.0.1:8001/chat",
+  ]);
+
+  assert.ok(requestedPrompt.includes(chunkTestRecord.content));
+  assert.ok(requestedPrompt.includes(chunkTestRecord.id));
+  assert.ok(requestedPrompt.includes("[E1]"));
+
+  const payload = response.json();
+
+  assert.equal(payload.data.model, "qwen3.5:4b");
+  assert.equal(
+    payload.data.response,
+    "El fragmento [E1] contiene la evidencia recuperada.",
+  );
+
+  assert.equal(payload.data.evidence.length, 1);
+  assert.equal(payload.data.evidence[0].id, chunkTestRecord.id);
+  assert.equal(payload.data.evidence[0].similarity, 0.91);
+});
+
+test("POST project investigate returns 404 when project does not exist", async () => {
+  let aiServiceCalled = false;
+
+  const store = createFakeEmbeddingStore({
+    projectExists: async () => false,
+  });
+
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, store, {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async () => {
+      aiServiceCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/investigate",
+    payload: {
+      question: "Investiga el incidente.",
+    },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Project not found",
+  });
+  assert.equal(aiServiceCalled, false);
+});
+
+test("POST project investigate returns 503 when embedding service is unavailable", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async () =>
+      new Response("Service unavailable", { status: 503 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "Investiga el incidente.",
+    },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Embedding service unavailable",
+  });
+});
+
+test("POST project investigate returns empty evidence when no fragments match", async () => {
+  const requestedUrls: string[] = [];
+  const app = createTestApp();
+
+  registerInvestigationRoutes(
+    app,
+    createFakeEmbeddingStore({
+      searchSimilarChunks: async () => [],
+    }),
+    {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url === "http://127.0.0.1:8001/embeddings") {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+
+        // Respuesta de reserva: no debería llamarse al chat.
+        return Response.json({
+          model: "qwen3.5:4b",
+          response: "Esta respuesta no debería utilizarse.",
+        });
+      },
+    },
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué sabemos sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  const payload = response.json() as {
+    data: {
+      model: string;
+      response: string;
+      evidence: unknown[];
+    };
+  };
+
+  assert.equal(payload.data.model, "not-invoked");
+  assert.deepEqual(payload.data.evidence, []);
+
+  assert.ok(
+    payload.data.response.includes(
+      "No se encontró evidencia suficientemente relevante",
+    ),
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+  ]);
+});
+test("POST project investigate filters low-similarity matches without invoking chat", async () => {
+  const requestedUrls: string[] = [];
+  const app = createTestApp();
+
+  registerInvestigationRoutes(
+    app,
+    createFakeEmbeddingStore({
+      searchSimilarChunks: async () => [
+        {
+          id: "0adad1b6-e9f4-4f16-aeea-6da618741466",
+          projectId: sourceTestProjectId,
+          documentId: "2bf11722-4a62-4ed9-bc94-1fea8407edc9",
+          ordinal: 0,
+          content:
+            "Documento de prueba almacenado en PostgreSQL para SentinelOps AI.",
+          score: 0.3815711866063125,
+        },
+      ],
+    }),
+    {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url === "http://127.0.0.1:8001/embeddings") {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+
+        return Response.json({
+          model: "qwen3.5:4b",
+          response: "Esta respuesta no debería utilizarse.",
+        });
+      },
+    },
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question:
+        "Which service produced an HTTP 500 error?",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  const payload = response.json() as {
+    data: {
+      model: string;
+      response: string;
+      evidence: unknown[];
+    };
+  };
+
+  assert.equal(payload.data.model, "not-invoked");
+  assert.deepEqual(payload.data.evidence, []);
+
+  assert.ok(
+    payload.data.response.includes(
+      "No se encontró evidencia suficientemente relevante",
+    ),
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+  ]);
 });
