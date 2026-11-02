@@ -1,0 +1,77 @@
+{
+  "dataset": "sentinelops-synthetic-demo-v1",
+  "incident_id": "INC-001",
+  "classification": "synthetic_evaluation_reference",
+  "ingestion_policy": "evaluation_only_do_not_ingest",
+  "expected_observations": [
+    {
+      "id": "OBS-01",
+      "description": "Cinco intentos paralelos para la operacion create_order comparten el request_id req-7841.",
+      "source": "incident-001/retry-dispatcher.synthetic.ts",
+      "supporting_log": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:11Z"
+    },
+    {
+      "id": "OBS-02",
+      "description": "El pool de PostgreSQL alcanza su capacidad maxima de 20 conexiones activas, cero conexiones libres y 18 solicitudes en espera.",
+      "source": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:12Z"
+    },
+    {
+      "id": "OBS-03",
+      "description": "La ruta POST /api/orders devuelve HTTP 500 tras un timeout al adquirir una conexion del pool de PostgreSQL.",
+      "source": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:14Z",
+      "request_id": "req-7841"
+    },
+    {
+      "id": "OBS-04",
+      "description": "La cola de reintentos alcanza 42 elementos y registra 120 reintentos iniciados durante el ultimo minuto.",
+      "source": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:16Z"
+    },
+    {
+      "id": "OBS-05",
+      "description": "La saturacion persiste: 20 conexiones activas, ninguna libre y 31 solicitudes en espera.",
+      "source": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:35Z"
+    },
+    {
+      "id": "OBS-06",
+      "description": "La solicitud registrada por payment-gateway termina con HTTP 200 en 180 milisegundos.",
+      "source": "incident-001/observed-logs.jsonl",
+      "timestamp_utc": "2026-10-20T14:03:14Z"
+    }
+  ],
+  "best_supported_hypothesis": {
+    "statement": "Los intentos paralelos de una misma operacion pudieron incrementar la demanda concurrente de conexiones y contribuir a la saturacion del pool de PostgreSQL y a los errores HTTP 500.",
+    "classification": "supported_hypothesis_not_proven_root_cause",
+    "supporting_observations": [
+      "OBS-01",
+      "OBS-02",
+      "OBS-03",
+      "OBS-04",
+      "OBS-05"
+    ],
+    "limitations": [
+      "La secuencia temporal por si sola no demuestra causalidad.",
+      "El archivo de codigo es sintetico y no demuestra que ese codigo se ejecutara en un sistema real.",
+      "No se dispone de trazas completas que vinculen cada intento con una conexion de base de datos.",
+      "No debe afirmarse que los reintentos sean la unica causa raiz."
+    ]
+  },
+  "must_not_claim": [
+    "Que el incidente ocurrio en produccion.",
+    "Que la causa raiz esta demostrada de forma definitiva.",
+    "Que payment-gateway provoco el error HTTP 500.",
+    "Que el codigo sintetico fue desplegado o ejecutado realmente.",
+    "Que se recuperaron logs, metricas o trazas adicionales a las incluidas en las fuentes."
+  ],
+  "evaluation_rubric": [
+    "Distingue observaciones verificables de hipotesis causales.",
+    "Relaciona los intentos paralelos, la saturacion del pool y el timeout HTTP 500 cuando la evidencia recuperada lo permita.",
+    "Cita las evidencias recuperadas y no inventa referencias.",
+    "Reconoce la incertidumbre causal y los datos faltantes.",
+    "No presenta herramientas o infraestructura no verificadas como existentes."
+  ]
+}

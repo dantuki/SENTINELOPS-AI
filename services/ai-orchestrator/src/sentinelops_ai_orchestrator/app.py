@@ -1,19 +1,22 @@
 """FastAPI application for the SentinelOps AI orchestrator."""
-import httpx
+
 import logging
+import math
 import os
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException
-from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field, field_validator
 
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+# Embeddings locales mediante Ollama.
+EMBEDDING_MODEL = "qwen3-embedding:0.6b"
+EMBEDDING_DIMENSIONS = 1024
 MAX_BATCH_SIZE = 32
 MAX_TEXT_CHARS = 20_000
+EMBEDDING_TIMEOUT_SECONDS = 30.0
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -40,10 +43,12 @@ class EmbeddingRequest(BaseModel):
         for text in texts:
             if not text.strip():
                 raise ValueError("Texts must not be empty.")
+
             if len(text) > MAX_TEXT_CHARS:
                 raise ValueError(
                     f"Each text must be at most {MAX_TEXT_CHARS} characters."
                 )
+
         return texts
 
 
@@ -58,19 +63,23 @@ class EmbeddingItem(BaseModel):
 
 
 class EmbeddingResponse(BaseModel):
-    """Embedding generation response."""
+    """Embedding response returned to the product API."""
 
     model: str
     dimensions: int
     data: list[EmbeddingItem]
 
 
-class EmbeddingProviderNotConfigured(Exception):
-    """Raised when the provider API key is missing."""
+class EmbeddingProviderUnavailable(Exception):
+    """Raised when the local Ollama service cannot be reached."""
+
+
+class EmbeddingProviderTimeout(Exception):
+    """Raised when the local embedding model exceeds its timeout."""
 
 
 class EmbeddingProviderRequestError(Exception):
-    """Raised when the provider fails or returns an invalid response."""
+    """Raised when Ollama fails or returns an invalid embedding response."""
 
 
 EmbeddingGenerator = Callable[
@@ -106,74 +115,122 @@ def health_check() -> HealthResponse:
 async def generate_embeddings(
     texts: list[str],
 ) -> tuple[str, list[list[float]]]:
-    """Generate text embeddings using the configured OpenAI model."""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    """Generate validated embeddings through the local Ollama API."""
 
-    if not api_key:
-        raise EmbeddingProviderNotConfigured
+    base_url = (
+        os.environ.get("OLLAMA_BASE_URL")
+        or "http://127.0.0.1:11434"
+    ).rstrip("/")
+
+    model = (
+        os.environ.get("OLLAMA_EMBEDDING_MODEL")
+        or EMBEDDING_MODEL
+    )
 
     try:
-        async with AsyncOpenAI(
-            api_key=api_key,
-            timeout=20.0,
-            max_retries=1,
+        async with httpx.AsyncClient(
+            timeout=EMBEDDING_TIMEOUT_SECONDS,
         ) as client:
-            response = await client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts,
-                encoding_format="float",
+            response = await client.post(
+                f"{base_url}/api/embed",
+                json={
+                    "model": model,
+                    "input": texts,
+                },
             )
-    except OpenAIError as exc:
-        # Log only diagnostic metadata. Never log keys or input text.
+            response.raise_for_status()
+            payload = response.json()
+
+    except httpx.TimeoutException as exc:
+        logger.warning("Local embedding model request timed out.")
+        raise EmbeddingProviderTimeout from exc
+
+    except httpx.ConnectError as exc:
+        logger.warning(
+            "Local Ollama service is unavailable for embeddings."
+        )
+        raise EmbeddingProviderUnavailable from exc
+
+    except httpx.HTTPError as exc:
         logger.error(
-            "Embedding provider request failed: type=%s status_code=%s "
-            "request_id=%s",
+            "Local embedding request failed: type=%s status_code=%s",
             type(exc).__name__,
-            getattr(exc, "status_code", None),
-            getattr(exc, "request_id", None),
+            getattr(
+                getattr(exc, "response", None),
+                "status_code",
+                None,
+            ),
         )
         raise EmbeddingProviderRequestError from exc
 
-    items = sorted(response.data, key=lambda item: item.index)
+    except ValueError as exc:
+        logger.error("Local embedding model returned invalid JSON.")
+        raise EmbeddingProviderRequestError from exc
 
-    if len(items) != len(texts):
+    if not isinstance(payload, dict):
         logger.error(
-            "Embedding provider returned an unexpected item count: "
-            "expected=%s received=%s",
+            "Local embedding model returned a non-object response."
+        )
+        raise EmbeddingProviderRequestError
+
+    returned_model = payload.get("model")
+    raw_embeddings = payload.get("embeddings")
+
+    if (
+        not isinstance(returned_model, str)
+        or not returned_model.strip()
+        or not isinstance(raw_embeddings, list)
+        or len(raw_embeddings) != len(texts)
+    ):
+        logger.error(
+            "Local embedding response contract is invalid: "
+            "expected_items=%s",
             len(texts),
-            len(items),
         )
         raise EmbeddingProviderRequestError
 
     vectors: list[list[float]] = []
 
-    for expected_index, item in enumerate(items):
+    for index, raw_vector in enumerate(raw_embeddings):
         if (
-            item.index != expected_index
-            or len(item.embedding) != EMBEDDING_DIMENSIONS
-            or not all(
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and __import__("math").isfinite(value)
-                for value in item.embedding
-            )
+            not isinstance(raw_vector, list)
+            or len(raw_vector) != EMBEDDING_DIMENSIONS
         ):
             logger.error(
-                "Embedding provider returned an invalid vector: "
-                "item_index=%s expected_index=%s dimensions=%s",
-                item.index,
-                expected_index,
-                len(item.embedding),
+                "Local embedding vector has invalid dimensions: "
+                "item_index=%s expected_dimensions=%s actual_dimensions=%s",
+                index,
+                EMBEDDING_DIMENSIONS,
+                (
+                    len(raw_vector)
+                    if isinstance(raw_vector, list)
+                    else "not-a-list"
+                ),
             )
             raise EmbeddingProviderRequestError
 
-        vectors.append(item.embedding)
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in raw_vector
+        ):
+            logger.error(
+                "Local embedding vector contains invalid values: "
+                "item_index=%s",
+                index,
+            )
+            raise EmbeddingProviderRequestError
 
-    return response.model, vectors
+        vectors.append(
+            [float(value) for value in raw_vector]
+        )
+
+    return returned_model, vectors
 
 
 def get_embedding_generator() -> EmbeddingGenerator:
-    """Dependency hook that allows the provider to be replaced in tests."""
+    """Dependency hook that allows the provider to be mocked in tests."""
     return generate_embeddings
 
 
@@ -181,47 +238,79 @@ def get_embedding_generator() -> EmbeddingGenerator:
     "/embeddings",
     response_model=EmbeddingResponse,
     tags=["Embeddings"],
-    summary="Generate vector embeddings for a batch of texts",
+    summary="Generate local vector embeddings for a batch of texts",
 )
 async def create_embeddings(
     payload: EmbeddingRequest,
     generator: EmbeddingGenerator = Depends(get_embedding_generator),
 ) -> EmbeddingResponse:
-    """Return one 1536-dimensional vector for each input text."""
+    """Return one 1024-dimensional vector for each input text."""
+
     try:
         model, vectors = await generator(payload.texts)
-    except EmbeddingProviderNotConfigured:
+
+    except EmbeddingProviderUnavailable:
         raise HTTPException(
             status_code=503,
-            detail="Embedding provider is not configured.",
+            detail="Local embedding model service is unavailable.",
         ) from None
+
+    except EmbeddingProviderTimeout:
+        raise HTTPException(
+            status_code=504,
+            detail="Local embedding model request timed out.",
+        ) from None
+
     except EmbeddingProviderRequestError:
         raise HTTPException(
             status_code=502,
-            detail="Embedding provider request failed.",
+            detail="Local embedding model returned an invalid response.",
         ) from None
 
-    if len(vectors) != len(payload.texts) or any(
-        len(vector) != EMBEDDING_DIMENSIONS for vector in vectors
+    # Validate again in case the generator has been replaced in tests.
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or len(vectors) != len(payload.texts)
+        or any(
+            len(vector) != EMBEDDING_DIMENSIONS
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in vector
+            )
+            for vector in vectors
+        )
     ):
-        logger.error("Embedding generator returned invalid vector dimensions.")
+        logger.error(
+            "Embedding generator returned an invalid response contract."
+        )
         raise HTTPException(
             status_code=502,
-            detail="Embedding provider returned an invalid response.",
+            detail="Local embedding model returned an invalid response.",
         )
 
     return EmbeddingResponse(
         model=model,
         dimensions=EMBEDDING_DIMENSIONS,
         data=[
-            EmbeddingItem(index=index, embedding=vector)
+            EmbeddingItem(
+                index=index,
+                embedding=vector,
+            )
             for index, vector in enumerate(vectors)
         ],
     )
+
+
 class ChatRequest(BaseModel):
     """A prompt sent to the local language model."""
 
-    prompt: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
+    prompt: str = Field(
+        min_length=1,
+        max_length=MAX_TEXT_CHARS,
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -229,6 +318,7 @@ class ChatRequest(BaseModel):
         """Reject blank prompts before contacting the model."""
         if not prompt.strip():
             raise ValueError("Prompt must not be empty.")
+
         return prompt
 
 
@@ -244,7 +334,7 @@ class LocalModelUnavailable(Exception):
 
 
 class LocalModelTimeout(Exception):
-    """Raised when the local model exceeds the request timeout."""
+    """Raised when the local model exceeds its timeout."""
 
 
 class LocalModelResponseError(Exception):
@@ -257,13 +347,20 @@ LocalChatGenerator = Callable[
 ]
 
 
-async def generate_local_chat(prompt: str) -> tuple[str, str]:
+async def generate_local_chat(
+    prompt: str,
+) -> tuple[str, str]:
     """Generate a response using the local Ollama chat API."""
+
     base_url = (
         os.environ.get("OLLAMA_BASE_URL")
         or "http://127.0.0.1:11434"
     ).rstrip("/")
-    model = os.environ.get("OLLAMA_CHAT_MODEL") or "qwen3.5:4b"
+
+    model = (
+        os.environ.get("OLLAMA_CHAT_MODEL")
+        or "qwen3.5:4b"
+    )
 
     messages = [
         {
@@ -279,7 +376,10 @@ async def generate_local_chat(prompt: str) -> tuple[str, str]:
                 "Responde en espanol de forma clara y tecnica."
             ),
         },
-        {"role": "user", "content": prompt},
+        {
+            "role": "user",
+            "content": prompt,
+        },
     ]
 
     try:
@@ -292,10 +392,11 @@ async def generate_local_chat(prompt: str) -> tuple[str, str]:
                     "stream": False,
                     "think": False,
                     "options": {
-                        "num_predict": 512,
+                        "num_predict": 1536,
                     },
                 },
             )
+
             response.raise_for_status()
             payload = response.json()
 
@@ -311,7 +412,11 @@ async def generate_local_chat(prompt: str) -> tuple[str, str]:
         logger.error(
             "Local model HTTP request failed: type=%s status_code=%s",
             type(exc).__name__,
-            getattr(getattr(exc, "response", None), "status_code", None),
+            getattr(
+                getattr(exc, "response", None),
+                "status_code",
+                None,
+            ),
         )
         raise LocalModelResponseError from exc
 
@@ -323,11 +428,16 @@ async def generate_local_chat(prompt: str) -> tuple[str, str]:
         not isinstance(payload, dict)
         or not isinstance(payload.get("model"), str)
         or not isinstance(payload.get("message"), dict)
-        or not isinstance(payload["message"].get("content"), str)
+        or not isinstance(
+            payload["message"].get("content"),
+            str,
+        )
         or not payload["message"]["content"].strip()
         or payload.get("done") is not True
     ):
-        logger.error("Local model returned an invalid response contract.")
+        logger.error(
+            "Local model returned an invalid response contract."
+        )
         raise LocalModelResponseError
 
     return (
@@ -352,6 +462,7 @@ async def create_chat_response(
     generator: LocalChatGenerator = Depends(get_local_chat_generator),
 ) -> ChatResponse:
     """Generate a response without exposing internal thinking output."""
+
     try:
         model, generated_text = await generator(payload.prompt)
 

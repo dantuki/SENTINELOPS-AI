@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import type { FastifyInstance } from "fastify";
-
+import { registerInvestigationRoutes } from "../src/investigation-routes.js";
 import { buildApp } from "../src/app.js";
 import type {
   ChunkEmbeddingInput,
@@ -1239,12 +1239,12 @@ function createFakeEmbeddingStore(
 }
 
 const fakeEmbeddingVector = (): number[] =>
-  Array.from({ length: 1536 }, () => 0.125);
+  Array.from({ length: 1024 }, () => 0.125);
 
 function fakeEmbeddingPayload(count: number): unknown {
   return {
-    model: "text-embedding-3-small",
-    dimensions: 1536,
+    model: "qwen3-embedding:0.6b",
+    dimensions: 1024,
     data: Array.from({ length: count }, (_, index) => ({
       index,
       embedding: fakeEmbeddingVector(),
@@ -1284,12 +1284,12 @@ test("POST document embeddings generates and stores pending vectors", async () =
   assert.equal(requestedUrl, "http://127.0.0.1:8000/embeddings");
   assert.deepEqual(requestedTexts, [chunkTestRecord.content]);
   assert.equal(response.json().data.processed, 1);
-  assert.equal(response.json().data.model, "text-embedding-3-small");
+  assert.equal(response.json().data.model, "qwen3-embedding:0.6b");
   assert.equal(response.json().data.hasMore, false);
   assert.equal(savedEmbeddings.length, 1);
   assert.equal(savedEmbeddings[0]?.id, chunkTestRecord.id);
-  assert.equal(savedEmbeddings[0]?.embedding.length, 1536);
-  assert.equal(savedEmbeddings[0]?.model, "text-embedding-3-small");
+  assert.equal(savedEmbeddings[0]?.embedding.length, 1024);
+  assert.equal(savedEmbeddings[0]?.model, "qwen3-embedding:0.6b");
 });
 
 test("POST document embeddings returns 404 when document is not in project", async () => {
@@ -1344,7 +1344,7 @@ test("POST project search returns semantic results", async () => {
 
   const store = createFakeEmbeddingStore({
     searchSimilarChunks: async (_projectId, embedding, limit) => {
-      assert.equal(embedding.length, 1536);
+      assert.equal(embedding.length, 1024);
       capturedLimit = limit;
       return [
         {
@@ -1382,7 +1382,7 @@ test("POST project search returns semantic results", async () => {
   assert.equal(capturedLimit, 3);
   assert.equal(response.json().data.results.length, 1);
   assert.equal(response.json().data.results[0].score, 0.91);
-  assert.equal(response.json().data.model, "text-embedding-3-small");
+  assert.equal(response.json().data.model, "qwen3-embedding:0.6b");
 });
 
 test("POST project search returns 404 before embedding unknown project", async () => {
@@ -1415,8 +1415,8 @@ test("Embedding routes return 502 for invalid provider vector dimensions", async
   registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
     fetchImpl: async () =>
       Response.json({
-        model: "text-embedding-3-small",
-        dimensions: 1536,
+        model: "qwen3-embedding:0.6b",
+        dimensions: 1024,
         data: [{ index: 0, embedding: [0.1, 0.2] }],
       }),
   });
@@ -1476,6 +1476,7 @@ test("POST project search rejects blank query and out-of-range limit", async () 
   assert.equal(blankQuery.statusCode, 400);
   assert.equal(excessiveLimit.statusCode, 400);
 });
+
 test("POST /api/chat forwards the prompt to the AI orchestrator", async () => {
   let requestedUrl = "";
   let requestedPrompt = "";
@@ -1613,4 +1614,248 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
   assert.deepEqual(response.json(), {
     error: "Invalid AI model response",
   });
+});test("POST project investigate combines retrieved evidence and model response", async () => {
+  const requestedUrls: string[] = [];
+  let requestedPrompt = "";
+
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      requestedUrls.push(url);
+
+      if (url.endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      const body = JSON.parse(String(init?.body)) as {
+        prompt: string;
+      };
+
+      requestedPrompt = body.prompt;
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "El fragmento [E1] contiene la evidencia recuperada.",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+      limit: 3,
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+    "http://127.0.0.1:8001/chat",
+  ]);
+
+  assert.ok(requestedPrompt.includes(chunkTestRecord.content));
+  assert.ok(requestedPrompt.includes(chunkTestRecord.id));
+  assert.ok(requestedPrompt.includes("[E1]"));
+
+  const payload = response.json();
+
+  assert.equal(payload.data.model, "qwen3.5:4b");
+  assert.equal(
+    payload.data.response,
+    "El fragmento [E1] contiene la evidencia recuperada.",
+  );
+
+  assert.equal(payload.data.evidence.length, 1);
+  assert.equal(payload.data.evidence[0].id, chunkTestRecord.id);
+  assert.equal(payload.data.evidence[0].similarity, 0.91);
+});
+
+test("POST project investigate returns 404 when project does not exist", async () => {
+  let aiServiceCalled = false;
+
+  const store = createFakeEmbeddingStore({
+    projectExists: async () => false,
+  });
+
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, store, {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async () => {
+      aiServiceCalled = true;
+      return Response.json(fakeEmbeddingPayload(1));
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/investigate",
+    payload: {
+      question: "Investiga el incidente.",
+    },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), {
+    error: "Project not found",
+  });
+  assert.equal(aiServiceCalled, false);
+});
+
+test("POST project investigate returns 503 when embedding service is unavailable", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async () =>
+      new Response("Service unavailable", { status: 503 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "Investiga el incidente.",
+    },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), {
+    error: "Embedding service unavailable",
+  });
+});
+
+test("POST project investigate returns empty evidence when no fragments match", async () => {
+  const requestedUrls: string[] = [];
+  const app = createTestApp();
+
+  registerInvestigationRoutes(
+    app,
+    createFakeEmbeddingStore({
+      searchSimilarChunks: async () => [],
+    }),
+    {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url === "http://127.0.0.1:8001/embeddings") {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+
+        // Respuesta de reserva: no debería llamarse al chat.
+        return Response.json({
+          model: "qwen3.5:4b",
+          response: "Esta respuesta no debería utilizarse.",
+        });
+      },
+    },
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué sabemos sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  const payload = response.json() as {
+    data: {
+      model: string;
+      response: string;
+      evidence: unknown[];
+    };
+  };
+
+  assert.equal(payload.data.model, "not-invoked");
+  assert.deepEqual(payload.data.evidence, []);
+
+  assert.ok(
+    payload.data.response.includes(
+      "No se encontró evidencia suficientemente relevante",
+    ),
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+  ]);
+});
+test("POST project investigate filters low-similarity matches without invoking chat", async () => {
+  const requestedUrls: string[] = [];
+  const app = createTestApp();
+
+  registerInvestigationRoutes(
+    app,
+    createFakeEmbeddingStore({
+      searchSimilarChunks: async () => [
+        {
+          id: "0adad1b6-e9f4-4f16-aeea-6da618741466",
+          projectId: sourceTestProjectId,
+          documentId: "2bf11722-4a62-4ed9-bc94-1fea8407edc9",
+          ordinal: 0,
+          content:
+            "Documento de prueba almacenado en PostgreSQL para SentinelOps AI.",
+          score: 0.3815711866063125,
+        },
+      ],
+    }),
+    {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url === "http://127.0.0.1:8001/embeddings") {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+
+        return Response.json({
+          model: "qwen3.5:4b",
+          response: "Esta respuesta no debería utilizarse.",
+        });
+      },
+    },
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question:
+        "Which service produced an HTTP 500 error?",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  const payload = response.json() as {
+    data: {
+      model: string;
+      response: string;
+      evidence: unknown[];
+    };
+  };
+
+  assert.equal(payload.data.model, "not-invoked");
+  assert.deepEqual(payload.data.evidence, []);
+
+  assert.ok(
+    payload.data.response.includes(
+      "No se encontró evidencia suficientemente relevante",
+    ),
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+  ]);
 });
