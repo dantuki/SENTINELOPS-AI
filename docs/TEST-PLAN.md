@@ -101,6 +101,13 @@ Se validarán los siguientes casos:
 | Consulta pertinente | Se recuperan documentos relevantes del proyecto autorizado |
 | Consulta sin respaldo | Se obtiene un resultado vacío o insuficiente, sin inventar evidencia |
 | Documentos de otros proyectos | No se devuelven a usuarios sin autorización |
+| Repetición del mismo contenido | Se reutiliza el documento y no se generan embeddings duplicados |
+| Documento aún en procesamiento | Se informa que el trabajo sigue pendiente, sin afirmar que está indexado |
+| Documento archivado | Se rechaza la reingesta y no se afirma que se reindexó |
+| Fuente deshabilitada | La ingesta y los reintentos no la reactivan |
+| Timeout del proveedor de embeddings | Se conserva un estado reintentable y se informa el timeout |
+| Fuente inactiva o documento sin indexar | Sus fragmentos no aparecen en los resultados |
+| Búsqueda de incidente con documentos generales | Puede incluir evidencia del proyecto que no esté ligada a otro incidente |
 
 Se comprobará también que las referencias identifican documentos y ubicaciones reales.
 

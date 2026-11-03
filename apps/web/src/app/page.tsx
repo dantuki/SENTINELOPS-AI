@@ -103,6 +103,7 @@ export default function Home() {
           </a>
 
           <nav className="nav-links" aria-label="Navegación principal">
+            <a href="/knowledge-base">Knowledge Base</a>
             <a href="/investigation">Investigation Workspace</a>
             <a href="#principios">Principios</a>
             <a href="#flujo">Flujo de trabajo</a>

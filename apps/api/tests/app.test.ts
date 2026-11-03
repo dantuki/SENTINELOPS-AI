@@ -522,6 +522,34 @@ test("POST /api/projects/:projectId/incidents creates an incident", async () => 
   assert.equal(response.json().data.severity, "high");
 });
 
+test("POST incident returns 409 for a duplicate project external reference", async () => {
+  const app = createTestApp();
+  const store = createFakeProductStore({
+    createIncident: async () => {
+      throw Object.assign(new Error("duplicate external reference"), {
+        code: "23505",
+      });
+    },
+  });
+  registerProductRoutes(app, store);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${repositoryTestProject.id}/incidents`,
+    payload: {
+      externalReference: "INC-001",
+      title: "Duplicate incident",
+      severity: "high",
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.equal(
+    response.json().error,
+    "Incident external reference already exists in this project",
+  );
+});
+
 test("Product routes return 503 when persistence is not configured", async () => {
   const app = createTestApp();
   registerProductRoutes(app);
@@ -1338,6 +1366,23 @@ test("POST document embeddings returns 503 when orchestrator is unavailable", as
   assert.equal(response.body.includes("private network failure details"), false);
 });
 
+test("POST document embeddings returns 504 when orchestrator times out", async () => {
+  const app = createTestApp();
+  registerEmbeddingRoutes(app, createFakeEmbeddingStore(), {
+    fetchImpl: async () => new Response("timeout", { status: 504 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/documents/${documentTestRecord.id}/embeddings`,
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.deepEqual(response.json(), {
+    error: "Embedding request timed out",
+  });
+});
+
 test("POST project search returns semantic results", async () => {
   let requestedTexts: string[] = [];
   let capturedLimit: number | undefined;
@@ -1728,6 +1773,29 @@ test("POST project investigate returns 503 when embedding service is unavailable
   assert.equal(response.statusCode, 503);
   assert.deepEqual(response.json(), {
     error: "Embedding service unavailable",
+  });
+});
+
+test("POST project investigate returns 504 when embedding service times out", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async () =>
+      new Response("timeout", { status: 504 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "Investiga el incidente.",
+    },
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.deepEqual(response.json(), {
+    error: "Embedding request timed out",
   });
 });
 

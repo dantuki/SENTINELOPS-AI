@@ -74,6 +74,11 @@ export interface CreateIncidentInput {
   context?: Record<string, unknown>;
 }
 
+export interface EnsureIncidentResult {
+  incident: IncidentRecord;
+  created: boolean;
+}
+
 export interface ProductStore {
   listWorkspaces(): Promise<WorkspaceRecord[]>;
 
@@ -286,5 +291,65 @@ export class ProductRepository implements ProductStore {
     );
 
     return result.rows[0] ?? null;
+  }
+
+  async ensureIncident(
+    projectId: string,
+    input: CreateIncidentInput & { externalReference: string },
+  ): Promise<EnsureIncidentResult | null> {
+    const inserted = await this.pool.query<IncidentRecord>(
+      `
+        INSERT INTO incidents (
+          project_id,
+          external_reference,
+          title,
+          description,
+          service_name,
+          severity,
+          context
+        )
+        SELECT
+          $1::uuid,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7::jsonb
+        FROM projects
+        WHERE id = $1::uuid
+        ON CONFLICT (project_id, external_reference)
+          WHERE external_reference IS NOT NULL
+        DO NOTHING
+        RETURNING ${INCIDENT_COLUMNS}
+      `,
+      [
+        projectId,
+        input.externalReference,
+        input.title,
+        input.description ?? null,
+        input.serviceName ?? null,
+        input.severity,
+        JSON.stringify(input.context ?? {}),
+      ],
+    );
+    const created = inserted.rows[0];
+
+    if (created) {
+      return { incident: created, created: true };
+    }
+
+    const existing = await this.pool.query<IncidentRecord>(
+      `
+        SELECT ${INCIDENT_COLUMNS}
+        FROM incidents
+        WHERE project_id = $1::uuid
+          AND external_reference = $2
+      `,
+      [projectId, input.externalReference],
+    );
+    const incident = existing.rows[0];
+
+    return incident ? { incident, created: false } : null;
   }
 }

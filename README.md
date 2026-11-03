@@ -154,23 +154,22 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 | Área | Estado actual |
 |---|---|
 | Estructura del monorepo | Presente |
-| Interfaz Next.js | Existe una interfaz conceptual inicial |
-| API Fastify | Implementada con rutas y comprobaciones de estado existentes |
+| Interfaz Next.js | Incluye el espacio de investigación y la Knowledge Base; el flujo E2E sigue pendiente de validar |
+| API Fastify | Incluye API de producto, ingestión documental, embeddings, búsqueda e investigación |
 | PostgreSQL | Configuración y migraciones presentes |
 | pgvector | Extensión y migraciones de columnas vectoriales presentes |
-| Fuentes y documentos de proyectos | Existen implementaciones de rutas y repositorios |
-| Fragmentos documentales | Existen implementaciones de rutas y repositorios |
-| Endpoint de embeddings | Implementado mediante un adaptador externo de OpenAI |
-| Búsqueda semántica | Existen rutas de API y lógica de persistencia |
-| Integración con un modelo generativo local | Pendiente de implementación y verificación |
-| Embeddings locales | Pendientes de sustituir la integración externa actual |
+| Fuentes, documentos y fragmentos | Rutas y repositorios con ingestión, fragmentación e idempotencia |
+| Embeddings locales | El orquestador usa Ollama con `qwen3-embedding:0.6b` y vectores de 1024 dimensiones |
+| Generación local | El orquestador usa Ollama con `qwen3.5:4b` |
+| Búsqueda semántica | Recupera fragmentos indexados de fuentes activas dentro del proyecto |
+| Importación de INC-001 | Permite importar archivos de demostración allowlisted y asociarlos a un incidente |
+| Investigación E2E con persistencia real | Pendiente de validación con PostgreSQL y servicios activos |
 | Clasificador de incidentes entrenado | Planeado |
 | Servidor MCP independiente | Implementación y pruebas de protocolo pendientes de verificación |
-| Investigación completa de incidentes de extremo a extremo | Todavía no verificada |
 | Benchmark de evaluación | Planeado |
 | Despliegue de producción | No implementado ni validado |
 
-El endpoint actual de embeddings utiliza el modelo `text-embedding-3-small` de OpenAI y espera vectores de 1536 dimensiones. La transición a una arquitectura local debe tener en cuenta esta dependencia y gestionar de manera segura las migraciones y la compatibilidad de los embeddings.
+Las implementaciones de los proveedores locales están presentes, pero las pruebas con mocks no demuestran por sí solas que Ollama ni PostgreSQL estén disponibles. La integración E2E y la evaluación reproducible de resultados deben ejecutarse con servicios reales antes de declarar esas capacidades verificadas.
 
 Los resultados de pruebas reportados en sesiones anteriores no se presentan aquí como garantía de que el repositorio actual supere todas las comprobaciones. Las pruebas deben volver a ejecutarse sobre el estado real del código.
 
@@ -347,6 +346,14 @@ Comprueba el estado del contenedor:
 docker compose ps
 ```
 
+Aplica las migraciones una sola vez y en orden numérico:
+
+```sh
+docker compose exec -T postgres sh -c 'for f in /migrations/[0-9][0-9][0-9]_*.sql; do psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$f" || exit 1; done'
+```
+
+En una base de datos existente, crea primero una copia de seguridad. Las migraciones 004, 005 y 006 pueden abortar si detectan datos incompatibles o duplicados; revisa y reconcilia esos datos antes de volver a intentarlo. No borres datos para forzar la aplicación.
+
 No utilices comandos que eliminen los volúmenes persistentes cuando necesites detener o reiniciar los servicios de desarrollo.
 
 ### 5. Ejecutar la API de producto
@@ -369,15 +376,13 @@ La configuración actual de desarrollo utiliza el puerto `3000` por defecto.
 
 ### 7. Ejecutar el orquestador de IA
 
-Utiliza versiones de Python y `uv` compatibles con la configuración del proyecto. Una vez implementada y verificada la configuración local, el comando previsto es:
+Utiliza versiones de Python y `uv` compatibles con la configuración del proyecto. Inicia Ollama y asegúrate de que estén disponibles los modelos `qwen3-embedding:0.6b` y `qwen3.5:4b`. El orquestador usa esos modelos locales para embeddings y chat:
 
 ```bash
 uv run --project services/ai-orchestrator sentinelops-ai-orchestrator
 ```
 
-La implementación actual de embeddings depende de una credencial de OpenAI. Por tanto, **el flujo completo de IA local todavía no está disponible simplemente iniciando el orquestador existente**. Sustituir esta dependencia y validar la generación y los embeddings locales son objetivos explícitos del desarrollo.
-
-No añadas una clave de API de pago simplemente para seguir este README. La implementación local debe completarse y verificarse antes de afirmar que todo el flujo de IA funciona sin servicios externos.
+Que el servicio arranque no verifica por sí solo la calidad de las respuestas ni la integración E2E con la API, la base de datos y la interfaz.
 
 ### Ejecutar las pruebas
 
@@ -401,6 +406,13 @@ Compilación de la API:
 npm run build --workspace=@sentinelops/api
 ```
 
+Comprobación de tipos y compilación de la aplicación web:
+
+```bash
+npm run typecheck --workspace=@sentinelops/web
+npm run build --workspace=@sentinelops/web
+```
+
 Pruebas del orquestador Python:
 
 ```bash
@@ -414,8 +426,8 @@ Una suite de pruebas solo debe declararse satisfactoria después de ejecutar el 
 | Fase | Objetivo | Estado |
 |---|---|---|
 | 1 | Base de la aplicación y persistencia | Parcialmente implementada; verificar el estado actual |
-| 2 | Generación y embeddings con modelos locales | Planeado |
-| 3 | RAG local y recuperación híbrida | Pendiente de completar y verificar |
+| 2 | Generación y embeddings con modelos locales | Implementados mediante Ollama; validar con modelos reales en cada entorno |
+| 3 | Ingesta, RAG local y recuperación híbrida | Ingesta y búsqueda semántica implementadas; validación E2E y recuperación híbrida pendientes |
 | 4 | Entrenamiento y evaluación de un clasificador propio | Planeado |
 | 5 | Implementación y pruebas del servidor MCP independiente | Planeado |
 | 6 | Construcción del workflow de investigación de incidentes | Planeado |
