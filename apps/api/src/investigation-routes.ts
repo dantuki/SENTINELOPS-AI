@@ -169,21 +169,21 @@ function parseEmbeddingResponse(
     return null;
   }
 
-  const vector: unknown[] = item.embedding;
+  const embedding: number[] = [];
+  for (const coordinate of item.embedding) {
+    if (
+      typeof coordinate !== "number" ||
+      !Number.isFinite(coordinate)
+    ) {
+      return null;
+    }
 
-  if (
-    !vector.every(
-      (coordinate) =>
-        typeof coordinate === "number" &&
-        Number.isFinite(coordinate),
-    )
-  ) {
-    return null;
+    embedding.push(coordinate);
   }
 
   return {
     model: value.model,
-    embedding: vector as number[],
+    embedding,
   };
 }
 
@@ -336,9 +336,20 @@ export function registerInvestigationRoutes(
       }
 
       if (!embeddingHttpResponse.ok) {
-        return reply.code(503).send({
-          error: "Embedding service unavailable",
-        });
+        if (embeddingHttpResponse.status === 504) {
+          return reply.code(504).send({
+            error: "Embedding request timed out",
+          });
+        }
+
+        return reply
+          .code(embeddingHttpResponse.status === 502 ? 502 : 503)
+          .send({
+            error:
+              embeddingHttpResponse.status === 502
+                ? "Invalid embedding response"
+                : "Embedding service unavailable",
+          });
       }
 
       let embeddingPayload: unknown;
@@ -518,9 +529,20 @@ export function registerInvestigationRoutes(
       }
 
       if (!chatHttpResponse.ok) {
-        return reply.code(503).send({
-          error: "AI service unavailable",
-        });
+        if (chatHttpResponse.status === 504) {
+          return reply.code(504).send({
+            error: "Investigation model timed out",
+          });
+        }
+
+        return reply
+          .code(chatHttpResponse.status === 502 ? 502 : 503)
+          .send({
+            error:
+              chatHttpResponse.status === 502
+                ? "Invalid AI model response"
+                : "AI service unavailable",
+          });
       }
 
       // 11. Validar la respuesta inicial del modelo.
@@ -591,9 +613,20 @@ export function registerInvestigationRoutes(
         }
 
         if (!retryHttpResponse.ok) {
-          return reply.code(503).send({
-            error: "AI service unavailable during response regeneration",
-          });
+          if (retryHttpResponse.status === 504) {
+            return reply.code(504).send({
+              error: "AI response regeneration timed out",
+            });
+          }
+
+          return reply
+            .code(retryHttpResponse.status === 502 ? 502 : 503)
+            .send({
+              error:
+                retryHttpResponse.status === 502
+                  ? "Invalid AI regeneration response"
+                  : "AI service unavailable during response regeneration",
+            });
         }
 
         let retryPayload: unknown;

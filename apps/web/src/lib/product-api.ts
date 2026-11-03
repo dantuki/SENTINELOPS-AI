@@ -61,13 +61,24 @@ export async function forwardProductApi(
 
 function publicError(status: number): NextResponse {
   const mappedStatus =
-    status === 400 || status === 404 || status === 502 || status === 504
+    status === 400 ||
+    status === 404 ||
+    status === 409 ||
+    status === 413 ||
+    status === 415 ||
+    status === 422 ||
+    status === 502 ||
+    status === 504
       ? status
       : 503;
 
   const messages: Record<number, string> = {
     400: "Revisa los datos de la solicitud.",
     404: "No se encontró el recurso solicitado.",
+    409: "El documento ya se está procesando o necesita una acción de reintento.",
+    413: "El archivo supera el límite de tamaño permitido.",
+    415: "Este tipo de archivo no está permitido.",
+    422: "El archivo no pasó la validación de contenido.",
     502: "El servicio devolvió una respuesta no válida.",
     503: "El servicio de investigación no está disponible.",
     504: "La investigación tardó demasiado. Puedes intentarlo de nuevo.",

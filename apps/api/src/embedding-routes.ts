@@ -2,13 +2,16 @@
 import type { FastifyInstance } from "fastify";
 
 import {
+  requestEmbeddings,
+  type EmbeddingClientOptions,
+} from "./embedding-client.js";
+import {
   EmbeddingWriteConflictError,
   type ChunkEmbeddingInput,
   type PendingEmbeddingChunk,
   type SemanticSearchChunkRecord,
 } from "./chunk-repository.js";
 
-const EMBEDDING_DIMENSIONS = 1024;
 const EMBEDDING_BATCH_SIZE = 32;
 const MAX_TEXT_CHARS = 20000;
 const DEFAULT_SEARCH_LIMIT = 5;
@@ -36,31 +39,9 @@ interface EmbeddingStore {
   ): Promise<SemanticSearchChunkRecord[] | null>;
 }
 
-interface EmbeddingRouteOptions {
-  aiOrchestratorUrl?: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}
-
 interface ApiError {
   error: string;
 }
-
-interface ParsedEmbeddingResponse {
-  model: string;
-  vectors: number[][];
-}
-
-type EmbeddingServiceResult =
-  | {
-      ok: true;
-      model: string;
-      vectors: number[][];
-    }
-  | {
-      ok: false;
-      kind: "unavailable" | "invalid";
-    };
 
 const apiErrorSchema = {
   type: "object",
@@ -135,141 +116,10 @@ const semanticSearchResponseSchema = {
   additionalProperties: false,
 } as const;
 
-function isRecord(
-  value: unknown,
-): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value)
-  );
-}
-
-function parseEmbeddingResponse(
-  value: unknown,
-  expectedCount: number,
-): ParsedEmbeddingResponse | null {
-  if (
-    !isRecord(value) ||
-    typeof value.model !== "string" ||
-    value.model.trim().length === 0 ||
-    value.dimensions !== EMBEDDING_DIMENSIONS ||
-    !Array.isArray(value.data) ||
-    value.data.length !== expectedCount
-  ) {
-    return null;
-  }
-
-  const vectors: number[][] = [];
-
-  for (let index = 0; index < expectedCount; index += 1) {
-    const item: unknown = value.data[index];
-
-    if (
-      !isRecord(item) ||
-      item.index !== index ||
-      !Array.isArray(item.embedding) ||
-      item.embedding.length !== EMBEDDING_DIMENSIONS
-    ) {
-      return null;
-    }
-
-    const vector: unknown[] = item.embedding;
-
-    if (
-      !vector.every(
-        (coordinate) =>
-          typeof coordinate === "number" &&
-          Number.isFinite(coordinate),
-      )
-    ) {
-      return null;
-    }
-
-    vectors.push(vector as number[]);
-  }
-
-  return {
-    model: value.model,
-    vectors,
-  };
-}
-
-async function requestEmbeddings(
-  texts: string[],
-  options: EmbeddingRouteOptions,
-): Promise<EmbeddingServiceResult> {
-  const baseUrl =
-    options.aiOrchestratorUrl ??
-    process.env.AI_ORCHESTRATOR_URL ??
-    "http://127.0.0.1:8000";
-
-  let endpoint: URL;
-
-  try {
-    const base = new URL(baseUrl);
-
-    if (!["http:", "https:"].includes(base.protocol)) {
-      return { ok: false, kind: "unavailable" };
-    }
-
-    endpoint = new URL("/embeddings", base);
-  } catch {
-    return { ok: false, kind: "unavailable" };
-  }
-
-  const timeoutMs = options.timeoutMs ?? 20000;
-  const fetchImpl = options.fetchImpl ?? fetch;
-
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return { ok: false, kind: "unavailable" };
-  }
-
-  let response: Response;
-
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ texts }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch {
-    return { ok: false, kind: "unavailable" };
-  }
-
-  if (!response.ok) {
-    return { ok: false, kind: "unavailable" };
-  }
-
-  let payload: unknown;
-
-  try {
-    payload = await response.json();
-  } catch {
-    return { ok: false, kind: "invalid" };
-  }
-
-  const parsed = parseEmbeddingResponse(payload, texts.length);
-
-  if (parsed === null) {
-    return { ok: false, kind: "invalid" };
-  }
-
-  return {
-    ok: true,
-    model: parsed.model,
-    vectors: parsed.vectors,
-  };
-}
-
 export function registerEmbeddingRoutes(
   app: FastifyInstance,
   store?: EmbeddingStore,
-  options: EmbeddingRouteOptions = {},
+  options: EmbeddingClientOptions = {},
 ): void {
   app.post<{
     Params: {
@@ -304,6 +154,7 @@ export function registerEmbeddingRoutes(
           409: apiErrorSchema,
           502: apiErrorSchema,
           503: apiErrorSchema,
+          504: apiErrorSchema,
         },
       },
     },
@@ -357,6 +208,12 @@ export function registerEmbeddingRoutes(
         if (providerResult.kind === "invalid") {
           return reply.code(502).send({
             error: "Invalid embedding response",
+          });
+        }
+
+        if (providerResult.kind === "timeout") {
+          return reply.code(504).send({
+            error: "Embedding request timed out",
           });
         }
 
@@ -461,6 +318,7 @@ export function registerEmbeddingRoutes(
           404: apiErrorSchema,
           502: apiErrorSchema,
           503: apiErrorSchema,
+          504: apiErrorSchema,
         },
       },
     },
@@ -498,6 +356,12 @@ export function registerEmbeddingRoutes(
         if (providerResult.kind === "invalid") {
           return reply.code(502).send({
             error: "Invalid embedding response",
+          });
+        }
+
+        if (providerResult.kind === "timeout") {
+          return reply.code(504).send({
+            error: "Embedding request timed out",
           });
         }
 

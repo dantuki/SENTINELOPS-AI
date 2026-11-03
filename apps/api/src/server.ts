@@ -7,6 +7,7 @@ import { registerDocumentRoutes } from "./document-routes.js";
 import { DocumentRepository } from "./document-repository.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerInvestigationRoutes } from "./investigation-routes.js";
+import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerSourceRoutes } from "./source-routes.js";
@@ -86,6 +87,15 @@ async function main(): Promise<void> {
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);
   registerEmbeddingRoutes(app, chunkRepository);
+  registerIngestionRoutes(
+    app,
+    {
+      sources: sourceRepository,
+      documents: documentRepository,
+      chunks: chunkRepository,
+      incidents: productRepository,
+    },
+  );
   registerInvestigationRoutes(app, chunkRepository);
   registerChatRoutes(app);
 

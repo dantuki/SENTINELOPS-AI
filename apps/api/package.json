@@ -8,7 +8,7 @@
     "dev": "node --env-file-if-exists=../../.env --import=tsx --watch src/server.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
-    "test": "tsx --test tests/app.test.ts",
+    "test": "tsx --test tests/app.test.ts tests/ingestion.test.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

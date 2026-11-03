@@ -450,6 +450,7 @@ export function registerProductRoutes(
         body: createIncidentSchema,
         response: {
           201: incidentDataSchema,
+          409: apiErrorSchema,
           404: apiErrorSchema,
           503: apiErrorSchema,
         },
@@ -471,7 +472,13 @@ export function registerProductRoutes(
         }
 
         return reply.code(201).send({ data });
-      } catch {
+      } catch (error: unknown) {
+        if (isPostgresErrorCode(error, "23505")) {
+          return reply.code(409).send({
+            error: "Incident external reference already exists in this project",
+          });
+        }
+
         return reply.code(503).send({ error: "Persistence unavailable" });
       }
     },
