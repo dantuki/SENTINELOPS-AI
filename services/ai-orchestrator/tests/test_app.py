@@ -20,6 +20,7 @@ from sentinelops_ai_orchestrator.app import (
     app,
     get_embedding_generator,
     get_local_chat_generator,
+    get_model_readiness_checker,
 )
 
 
@@ -100,6 +101,102 @@ def test_health_endpoint_returns_expected_payload() -> None:
     }
 
 
+def test_readiness_endpoint_requires_both_local_models() -> None:
+    async def loaded_models() -> set[str]:
+        return {EMBEDDING_MODEL, "qwen3.5:4b"}
+
+    app.dependency_overrides[get_model_readiness_checker] = (
+        lambda: loaded_models
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "service": "sentinelops-ai-orchestrator",
+    }
+
+
+def test_readiness_endpoint_returns_503_when_a_model_is_not_loaded() -> None:
+    async def loaded_models() -> set[str]:
+        return {EMBEDDING_MODEL}
+
+    app.dependency_overrides[get_model_readiness_checker] = (
+        lambda: loaded_models
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Required local models are not loaded."
+    }
+
+
+def test_warmup_loads_and_verifies_both_configured_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def embeddings(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        calls.append("embeddings")
+        assert texts == ["SentinelOps model warm-up."]
+        return EMBEDDING_MODEL, [[0.0] * EMBEDDING_DIMENSIONS]
+
+    async def chat(prompt: str, max_tokens: int) -> tuple[str, str]:
+        calls.append("chat")
+        assert prompt == "Responde solo con la palabra listo."
+        assert max_tokens == 8
+        return "qwen3.5:4b", "listo"
+
+    async def loaded_models() -> set[str]:
+        return {EMBEDDING_MODEL, "qwen3.5:4b"}
+
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "qwen3.5:4b")
+    monkeypatch.setenv("OLLAMA_EMBEDDING_MODEL", EMBEDDING_MODEL)
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: embeddings
+    )
+    app.dependency_overrides[get_local_chat_generator] = lambda: chat
+    app.dependency_overrides[get_model_readiness_checker] = (
+        lambda: loaded_models
+    )
+
+    response = client.post("/warmup")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "service": "sentinelops-ai-orchestrator",
+    }
+    assert calls == ["embeddings", "chat"]
+
+
+def test_warmup_preserves_model_timeout_errors() -> None:
+    async def embeddings(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        return EMBEDDING_MODEL, [[0.0] * EMBEDDING_DIMENSIONS]
+
+    async def chat(prompt: str, max_tokens: int) -> tuple[str, str]:
+        raise LocalModelTimeout
+
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: embeddings
+    )
+    app.dependency_overrides[get_local_chat_generator] = lambda: chat
+
+    response = client.post("/warmup")
+
+    assert response.status_code == 504
+    assert response.json() == {
+        "detail": "Local model request timed out."
+    }
+
+
 def test_openapi_contains_health_embeddings_and_chat() -> None:
     response = client.get("/openapi.json")
 
@@ -108,8 +205,10 @@ def test_openapi_contains_health_embeddings_and_chat() -> None:
     paths = response.json()["paths"]
 
     assert "get" in paths["/health"]
+    assert "get" in paths["/ready"]
     assert "post" in paths["/embeddings"]
     assert "post" in paths["/chat"]
+    assert "post" in paths["/warmup"]
 
 
 def test_generate_embeddings_uses_local_ollama(
@@ -400,8 +499,12 @@ def test_embeddings_rejects_invalid_generator_contract() -> None:
 
 
 def test_chat_returns_response_from_local_model() -> None:
-    async def fake_generator(prompt: str) -> tuple[str, str]:
+    async def fake_generator(
+        prompt: str,
+        max_tokens: int,
+    ) -> tuple[str, str]:
         assert prompt == "Investiga un error HTTP 503."
+        assert max_tokens == 1536
         return "qwen3.5:4b", "Revisaría primero los logs."
 
     app.dependency_overrides[get_local_chat_generator] = (
@@ -420,6 +523,63 @@ def test_chat_returns_response_from_local_model() -> None:
     }
 
 
+def test_chat_forwards_a_bounded_token_budget() -> None:
+    async def fake_generator(
+        prompt: str,
+        max_tokens: int,
+    ) -> tuple[str, str]:
+        assert prompt == "Investiga INC-001."
+        assert max_tokens == 320
+        return "qwen3.5:4b", "Respuesta concisa."
+
+    app.dependency_overrides[get_local_chat_generator] = (
+        lambda: fake_generator
+    )
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga INC-001.", "max_tokens": 320},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["response"] == "Respuesta concisa."
+
+
+def test_generate_local_chat_rejects_a_token_limited_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": "qwen3.5:4b",
+                "message": {"content": "Respuesta incompleta"},
+                "done": True,
+                "done_reason": "length",
+                "eval_count": 1024,
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda *, timeout: mock_client,
+    )
+
+    with pytest.raises(LocalModelResponseError):
+        asyncio.run(
+            orchestrator.generate_local_chat(
+                "Investiga INC-001.",
+                max_tokens=1024,
+            )
+        )
+
+    assert mock_client.request_json["options"] == {
+        "num_predict": 1024,
+        "temperature": 0.1,
+    }
+
+
 def test_chat_rejects_blank_prompt() -> None:
     response = client.post(
         "/chat",
@@ -429,8 +589,20 @@ def test_chat_rejects_blank_prompt() -> None:
     assert response.status_code == 422
 
 
+def test_chat_rejects_token_budgets_above_the_existing_cap() -> None:
+    response = client.post(
+        "/chat",
+        json={"prompt": "Investiga INC-001.", "max_tokens": 1537},
+    )
+
+    assert response.status_code == 422
+
+
 def test_chat_returns_503_when_local_model_is_unavailable() -> None:
-    async def unavailable_generator(prompt: str) -> tuple[str, str]:
+    async def unavailable_generator(
+        prompt: str,
+        max_tokens: int,
+    ) -> tuple[str, str]:
         raise LocalModelUnavailable
 
     app.dependency_overrides[get_local_chat_generator] = (
@@ -449,7 +621,10 @@ def test_chat_returns_503_when_local_model_is_unavailable() -> None:
 
 
 def test_chat_returns_504_when_local_model_times_out() -> None:
-    async def timeout_generator(prompt: str) -> tuple[str, str]:
+    async def timeout_generator(
+        prompt: str,
+        max_tokens: int,
+    ) -> tuple[str, str]:
         raise LocalModelTimeout
 
     app.dependency_overrides[get_local_chat_generator] = (
@@ -468,7 +643,10 @@ def test_chat_returns_504_when_local_model_times_out() -> None:
 
 
 def test_chat_returns_502_for_invalid_model_response() -> None:
-    async def invalid_generator(prompt: str) -> tuple[str, str]:
+    async def invalid_generator(
+        prompt: str,
+        max_tokens: int,
+    ) -> tuple[str, str]:
         raise LocalModelResponseError
 
     app.dependency_overrides[get_local_chat_generator] = (

@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
@@ -19,6 +20,22 @@ MAX_TEXT_CHARS = 20_000
 EMBEDDING_TIMEOUT_SECONDS = 30.0
 
 logger = logging.getLogger("uvicorn.error")
+
+
+def _duration_ms(payload: object, key: str) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+
+    value = payload.get(key)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        return None
+
+    return round(value / 1_000_000, 1)
 
 
 class HealthResponse(BaseModel):
@@ -112,6 +129,102 @@ def health_check() -> HealthResponse:
     )
 
 
+async def get_loaded_model_names() -> set[str]:
+    """Return the models currently loaded in the local Ollama process."""
+    base_url = (
+        os.environ.get("OLLAMA_BASE_URL")
+        or "http://127.0.0.1:11434"
+    ).rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{base_url}/api/ps")
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "Could not check loaded local models: type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Local model service is not ready.",
+        ) from None
+
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("models"), list
+    ):
+        logger.error("Local model readiness response is invalid.")
+        raise HTTPException(
+            status_code=503,
+            detail="Local model service returned an invalid readiness response.",
+        )
+
+    names: set[str] = set()
+    for model in payload["models"]:
+        if not isinstance(model, dict):
+            continue
+
+        name = model.get("name") or model.get("model")
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+
+    return names
+
+
+def get_model_readiness_checker() -> Callable[[], Awaitable[set[str]]]:
+    """Dependency hook for local model readiness checks."""
+    return get_loaded_model_names
+
+
+def get_required_model_names() -> set[str]:
+    """Return the configured chat and embedding model names."""
+    return {
+        (
+            os.environ.get("OLLAMA_CHAT_MODEL")
+            or "qwen3.5:4b"
+        ),
+        (
+            os.environ.get("OLLAMA_EMBEDDING_MODEL")
+            or EMBEDDING_MODEL
+        ),
+    }
+
+
+@app.get(
+    "/ready",
+    response_model=HealthResponse,
+    tags=["Health"],
+    summary="Check whether the required local models are loaded",
+)
+async def readiness_check(
+    loaded_models: Callable[[], Awaitable[set[str]]] = Depends(
+        get_model_readiness_checker
+    ),
+) -> HealthResponse:
+    """Report ready only when both configured models are loaded."""
+    try:
+        loaded = await loaded_models()
+    except HTTPException:
+        raise
+
+    missing = get_required_model_names() - loaded
+    if missing:
+        logger.info(
+            "Local model service is not ready: missing_models=%s",
+            sorted(missing),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Required local models are not loaded.",
+        )
+
+    return HealthResponse(
+        status="ok",
+        service="sentinelops-ai-orchestrator",
+    )
+
+
 async def generate_embeddings(
     texts: list[str],
 ) -> tuple[str, list[list[float]]]:
@@ -126,6 +239,7 @@ async def generate_embeddings(
         os.environ.get("OLLAMA_EMBEDDING_MODEL")
         or EMBEDDING_MODEL
     )
+    request_started = time.perf_counter()
 
     try:
         async with httpx.AsyncClient(
@@ -142,7 +256,10 @@ async def generate_embeddings(
             payload = response.json()
 
     except httpx.TimeoutException as exc:
-        logger.warning("Local embedding model request timed out.")
+        logger.warning(
+            "Local embedding model request timed out: request_ms=%.1f",
+            (time.perf_counter() - request_started) * 1000,
+        )
         raise EmbeddingProviderTimeout from exc
 
     except httpx.ConnectError as exc:
@@ -225,6 +342,21 @@ async def generate_embeddings(
         vectors.append(
             [float(value) for value in raw_vector]
         )
+
+    logger.info(
+        "Local embedding inference completed: model=%s request_ms=%.1f "
+        "ollama_total_ms=%s model_load_ms=%s prompt_tokens=%s items=%s",
+        returned_model,
+        (time.perf_counter() - request_started) * 1000,
+        _duration_ms(payload, "total_duration"),
+        _duration_ms(payload, "load_duration"),
+        (
+            payload.get("prompt_eval_count")
+            if isinstance(payload, dict)
+            else None
+        ),
+        len(texts),
+    )
 
     return returned_model, vectors
 
@@ -311,6 +443,7 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=MAX_TEXT_CHARS,
     )
+    max_tokens: int = Field(default=1536, ge=1, le=1536)
 
     @field_validator("prompt")
     @classmethod
@@ -342,13 +475,14 @@ class LocalModelResponseError(Exception):
 
 
 LocalChatGenerator = Callable[
-    [str],
+    [str, int],
     Awaitable[tuple[str, str]],
 ]
 
 
 async def generate_local_chat(
     prompt: str,
+    max_tokens: int = 1536,
 ) -> tuple[str, str]:
     """Generate a response using the local Ollama chat API."""
 
@@ -361,6 +495,7 @@ async def generate_local_chat(
         os.environ.get("OLLAMA_CHAT_MODEL")
         or "qwen3.5:4b"
     )
+    request_started = time.perf_counter()
 
     messages = [
         {
@@ -369,6 +504,14 @@ async def generate_local_chat(
                 "Eres SentinelOps AI, un asistente especializado en "
                 "investigacion de incidentes de software. "
                 "Distingue hechos, hipotesis y recomendaciones. "
+                "Interpreta waiting_requests como solicitudes esperando "
+                "disponibilidad del pool, no como transacciones bloqueadas. "
+                "active_connections son conexiones activas; "
+                "idle_connections son conexiones inactivas disponibles. "
+                "Un HTTP 200 de un componente no demuestra el exito de "
+                "una operacion de negocio completa. "
+                "La similitud semantica mide relevancia de recuperacion, "
+                "no probabilidad causal. "
                 "No inventes logs, metricas, resultados de herramientas "
                 "ni evidencias. No declares una causa raiz sin pruebas "
                 "suficientes. Si falta informacion, indica que "
@@ -392,7 +535,8 @@ async def generate_local_chat(
                     "stream": False,
                     "think": False,
                     "options": {
-                        "num_predict": 1536,
+                        "num_predict": max_tokens,
+                        "temperature": 0.1,
                     },
                 },
             )
@@ -401,7 +545,10 @@ async def generate_local_chat(
             payload = response.json()
 
     except httpx.TimeoutException as exc:
-        logger.warning("Local model request timed out.")
+        logger.warning(
+            "Local model request timed out: request_ms=%.1f",
+            (time.perf_counter() - request_started) * 1000,
+        )
         raise LocalModelTimeout from exc
 
     except httpx.ConnectError as exc:
@@ -440,6 +587,30 @@ async def generate_local_chat(
         )
         raise LocalModelResponseError
 
+    if payload.get("done_reason") == "length":
+        logger.warning(
+            "Local model response reached its token limit: model=%s "
+            "max_tokens=%s generated_tokens=%s",
+            payload["model"],
+            max_tokens,
+            payload.get("eval_count"),
+        )
+        raise LocalModelResponseError
+
+    logger.info(
+        "Local chat inference completed: model=%s request_ms=%.1f "
+        "ollama_total_ms=%s model_load_ms=%s prompt_eval_ms=%s "
+        "generation_ms=%s prompt_tokens=%s generated_tokens=%s",
+        payload["model"],
+        (time.perf_counter() - request_started) * 1000,
+        _duration_ms(payload, "total_duration"),
+        _duration_ms(payload, "load_duration"),
+        _duration_ms(payload, "prompt_eval_duration"),
+        _duration_ms(payload, "eval_duration"),
+        payload.get("prompt_eval_count"),
+        payload.get("eval_count"),
+    )
+
     return (
         payload["model"],
         payload["message"]["content"].strip(),
@@ -449,6 +620,86 @@ async def generate_local_chat(
 def get_local_chat_generator() -> LocalChatGenerator:
     """Dependency hook that allows chat generation to be mocked in tests."""
     return generate_local_chat
+
+
+@app.post(
+    "/warmup",
+    response_model=HealthResponse,
+    tags=["Health"],
+    summary="Load and verify the configured local models",
+)
+async def warm_up_models(
+    embedding_generator: EmbeddingGenerator = Depends(
+        get_embedding_generator
+    ),
+    chat_generator: LocalChatGenerator = Depends(
+        get_local_chat_generator
+    ),
+    loaded_models: Callable[[], Awaitable[set[str]]] = Depends(
+        get_model_readiness_checker
+    ),
+) -> HealthResponse:
+    """Warm both models explicitly, using each provider's existing timeout."""
+    try:
+        await embedding_generator(["SentinelOps model warm-up."])
+    except EmbeddingProviderUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Local embedding model service is unavailable.",
+        ) from None
+    except EmbeddingProviderTimeout:
+        raise HTTPException(
+            status_code=504,
+            detail="Local embedding model request timed out.",
+        ) from None
+    except EmbeddingProviderRequestError:
+        raise HTTPException(
+            status_code=502,
+            detail="Local embedding model returned an invalid response.",
+        ) from None
+
+    try:
+        await chat_generator(
+            "Responde solo con la palabra listo.",
+            8,
+        )
+    except LocalModelUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Local model service is unavailable.",
+        ) from None
+    except LocalModelTimeout:
+        raise HTTPException(
+            status_code=504,
+            detail="Local model request timed out.",
+        ) from None
+    except LocalModelResponseError:
+        raise HTTPException(
+            status_code=502,
+            detail="Local model returned an invalid response.",
+        ) from None
+
+    try:
+        loaded = await loaded_models()
+    except HTTPException:
+        raise
+
+    missing = get_required_model_names() - loaded
+    if missing:
+        logger.warning(
+            "Local model warm-up completed but models are not ready: "
+            "missing_models=%s",
+            sorted(missing),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Required local models are not loaded after warm-up.",
+        )
+
+    return HealthResponse(
+        status="ok",
+        service="sentinelops-ai-orchestrator",
+    )
 
 
 @app.post(
@@ -464,7 +715,10 @@ async def create_chat_response(
     """Generate a response without exposing internal thinking output."""
 
     try:
-        model, generated_text = await generator(payload.prompt)
+        model, generated_text = await generator(
+            payload.prompt,
+            payload.max_tokens,
+        )
 
     except LocalModelUnavailable:
         raise HTTPException(

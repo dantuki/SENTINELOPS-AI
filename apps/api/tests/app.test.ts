@@ -61,7 +61,7 @@ test("GET /health preserves the product API health response", async () => {
   });
 });
 
-test("AI dependency returns 200 when the orchestrator is healthy", async () => {
+test("AI dependency returns 200 when the orchestrator is ready", async () => {
   let requestedUrl = "";
 
   const app = createTestApp({
@@ -82,7 +82,7 @@ test("AI dependency returns 200 when the orchestrator is healthy", async () => {
   });
 
   assert.equal(response.statusCode, 200);
-  assert.equal(requestedUrl, "http://127.0.0.1:8000/health");
+  assert.equal(requestedUrl, "http://127.0.0.1:8000/ready");
   assert.deepEqual(response.json(), {
     status: "ok",
     service: "sentinelops-product-api",
@@ -1677,9 +1677,11 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
 
       const body = JSON.parse(String(init?.body)) as {
         prompt: string;
+        max_tokens: number;
       };
 
       requestedPrompt = body.prompt;
+      assert.equal(body.max_tokens, 1536);
 
       return Response.json({
         model: "qwen3.5:4b",
@@ -1925,5 +1927,56 @@ test("POST project investigate filters low-similarity matches without invoking c
 
   assert.deepEqual(requestedUrls, [
     "http://127.0.0.1:8001/embeddings",
+  ]);
+});
+
+test("incident investigation retains measured relevant evidence above its calibrated threshold", async () => {
+  const requestedUrls: string[] = [];
+  const app = createTestApp();
+
+  registerInvestigationRoutes(
+    app,
+    createFakeEmbeddingStore({
+      searchSimilarChunks: async () => [
+        {
+          ...chunkTestRecord,
+          score: 0.414,
+        },
+      ],
+    }),
+    {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+
+        if (url === "http://127.0.0.1:8001/embeddings") {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+
+        return Response.json({
+          model: "qwen3.5:4b",
+          response: "La evidencia recuperada respalda esta respuesta [E1].",
+        });
+      },
+    },
+  );
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question:
+        "Describe la cronología de INC-001, explica el significado de las métricas del pool y separa hechos, hipótesis e información faltante.",
+      incidentId: "INC-001",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().data.model, "qwen3.5:4b");
+  assert.equal(response.json().data.evidence[0].similarity, 0.414);
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8001/embeddings",
+    "http://127.0.0.1:8001/chat",
   ]);
 });

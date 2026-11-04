@@ -213,7 +213,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           return reply.code(503).send(unavailable);
         }
 
-        healthUrl = new URL("/health", baseUrl);
+        healthUrl = new URL("/ready", baseUrl);
       } catch {
         return reply.code(503).send(unavailable);
       }

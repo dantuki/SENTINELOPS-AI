@@ -8,7 +8,7 @@ El objetivo es construir un sistema especializado que ayude a los desarrolladore
 
 En lugar de generar explicaciones aparentemente convincentes sin verificarlas, SentinelOps busca diferenciar los hechos observados de las hipótesis, identificar información faltante, validar referencias y recomendar pruebas que permitan confirmar o descartar posibles causas raíz.
 
-**Estado del proyecto:** En desarrollo activo.
+**Estado del proyecto:** En desarrollo activo. Phase 3.1 permanece bloqueada; Phase 4 no ha comenzado.
 
 **Objetivo principal:** Construir y evaluar un sistema de inteligencia artificial especializado que pueda ejecutarse localmente sin requerir APIs de IA de pago para su funcionamiento principal.
 
@@ -156,22 +156,37 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 | Estructura del monorepo | Presente |
 | Interfaz Next.js | Incluye el espacio de investigación y la Knowledge Base; el flujo E2E sigue pendiente de validar |
 | API Fastify | Incluye API de producto, ingestión documental, embeddings, búsqueda e investigación |
-| PostgreSQL | Configuración y migraciones presentes |
-| pgvector | Extensión y migraciones de columnas vectoriales presentes |
-| Fuentes, documentos y fragmentos | Rutas y repositorios con ingestión, fragmentación e idempotencia |
+| PostgreSQL | Integración local verificada; el runner registra y aplica migraciones de forma transaccional |
+| pgvector | PostgreSQL 18.6 y pgvector 0.8.7 verificados en la ejecución local del 3 de noviembre de 2026 |
+| Fuentes, documentos y fragmentos | Ingesta real de INC-001, embeddings persistidos y repetición idempotente comprobadas localmente |
 | Embeddings locales | El orquestador usa Ollama con `qwen3-embedding:0.6b` y vectores de 1024 dimensiones |
 | Generación local | El orquestador usa Ollama con `qwen3.5:4b` |
-| Búsqueda semántica | Recupera fragmentos indexados de fuentes activas dentro del proyecto |
-| Importación de INC-001 | Permite importar archivos de demostración allowlisted y asociarlos a un incidente |
-| Investigación E2E con persistencia real | Pendiente de validación con PostgreSQL y servicios activos |
+| Búsqueda semántica | Recupera fragmentos indexados de fuentes activas, con filtros por proyecto e incidente |
+| Importación de INC-001 | Los dos archivos allowlisted se indexaron; reintentar no creó chunks ni embeddings duplicados |
+| Investigación E2E con persistencia real | La búsqueda recupera evidencia, pero la última evaluación factual no alcanzó la cobertura requerida |
+| Readiness del orquestador | `/health` es liveness; `/ready` comprueba que los dos modelos requeridos estén cargados |
+| Evaluación factual determinista | Incluye nueve reglas de factualidad para INC-001; no sustituye un benchmark completo |
 | Clasificador de incidentes entrenado | Planeado |
 | Servidor MCP independiente | Implementación y pruebas de protocolo pendientes de verificación |
-| Benchmark de evaluación | Planeado |
+| Evaluation y Observability Engines de Phase 4 | No iniciados: la puerta de aceptación de Phase 3.1 sigue bloqueada |
 | Despliegue de producción | No implementado ni validado |
 
-Las implementaciones de los proveedores locales están presentes, pero las pruebas con mocks no demuestran por sí solas que Ollama ni PostgreSQL estén disponibles. La integración E2E y la evaluación reproducible de resultados deben ejecutarse con servicios reales antes de declarar esas capacidades verificadas.
+### Resultado de validación de Phase 3.1
 
-Los resultados de pruebas reportados en sesiones anteriores no se presentan aquí como garantía de que el repositorio actual supere todas las comprobaciones. Las pruebas deben volver a ejecutarse sobre el estado real del código.
+**PHASE 3.1: BLOCKED.** En la ejecución local del 3 de noviembre de 2026:
+
+- PostgreSQL y pgvector estaban saludables. Se registraron las migraciones 001–004 ya presentes y se aplicaron 005–006. Los conteos de datos existentes no cambiaron durante las migraciones.
+- La ingesta real creó dos documentos indexados para INC-001; una segunda importación devolvió ambos como deduplicados y creó cero chunks y embeddings nuevos.
+- La prueba de aislamiento pasó en una base PostgreSQL aislada con fixtures sintéticos. La base original contiene un solo proyecto, así que no se modificó para sembrar un segundo proyecto.
+- La evaluación factual en modo de solo lectura (`--skip-ingestion`) recuperó todas las observaciones esperadas y mantuvo los conteos de la base original: 1 workspace, 1 proyecto, 2 incidentes, 3 fuentes, 5 documentos, 5 fragmentos y 5 embeddings.
+- La respuesta real más reciente tardó 11.5 segundos, pero solo cubrió 1/6 observaciones y afirmó una causa raíz no demostrada. Por tanto, la aceptación factual sigue bloqueada. En mediciones locales recientes, la GPU llegó al 100 %, la VRAM usada alcanzó 5.6 GiB de 6 GiB y la RAM disponible bajó a 6.1 GiB; son picos puntuales, no un benchmark sostenido.
+- Ollama informa explícitamente cuando una generación alcanza el límite de tokens; el AI Orchestrator rechaza esas salidas truncadas en lugar de devolverlas como respuestas completas.
+- Las nueve reglas deterministas de factualidad cubren confusiones observadas en INC-001. El archivo `ground-truth/INC-001.expected.json` no forma parte de la lista de ingesta ni del contexto RAG.
+- La aceptación continúa bloqueada por la cobertura insuficiente y la afirmación causal no respaldada; Phase 4 no ha comenzado.
+
+No se declara aprobada la fase ni se inicia Phase 4 hasta cerrar estos puntos con pruebas reproducibles. Los umbrales de similitud por incidente son experimentales y no representan confianza causal.
+
+Los resultados de pruebas con mocks y las mediciones de una ejecución local no garantizan la disponibilidad ni el rendimiento de otros entornos.
 
 ## Estrategia de IA local
 
@@ -346,13 +361,20 @@ Comprueba el estado del contenedor:
 docker compose ps
 ```
 
-Aplica las migraciones una sola vez y en orden numérico:
+Aplica o verifica las migraciones con el runner transaccional:
 
-```sh
-docker compose exec -T postgres sh -c 'for f in /migrations/[0-9][0-9][0-9]_*.sql; do psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$f" || exit 1; done'
+```cmd
+npm.cmd --prefix apps/api run migrate
 ```
 
-En una base de datos existente, crea primero una copia de seguridad. Las migraciones 004, 005 y 006 pueden abortar si detectan datos incompatibles o duplicados; revisa y reconcilia esos datos antes de volver a intentarlo. No borres datos para forzar la aplicación.
+En una base de datos existente, crea primero una copia de seguridad. El runner detecta las firmas de esquema legadas, registra checksums, aplica las migraciones pendientes en orden y es seguro de repetir. Las migraciones pueden abortar si detectan datos incompatibles o duplicados; revisa esos datos antes de volver a intentarlo. No borres datos para forzar la aplicación.
+
+Comprueba PostgreSQL y pgvector usando las variables configuradas dentro del contenedor:
+
+```powershell
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT current_database(), version()"'
+docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT extversion FROM pg_extension WHERE extname = ''vector''"'
+```
 
 No utilices comandos que eliminen los volúmenes persistentes cuando necesites detener o reiniciar los servicios de desarrollo.
 
@@ -383,6 +405,32 @@ uv run --project services/ai-orchestrator sentinelops-ai-orchestrator
 ```
 
 Que el servicio arranque no verifica por sí solo la calidad de las respuestas ni la integración E2E con la API, la base de datos y la interfaz.
+
+Comprueba que ambos modelos requeridos estén cargados antes de iniciar una evaluación:
+
+```bash
+curl --fail http://127.0.0.1:8000/ready
+```
+
+### Ejecutar Phase 3.1 para INC-001
+
+Con PostgreSQL, Ollama, el AI Orchestrator y Product API en ejecución, obtén el UUID de un proyecto existente y ejecuta:
+
+```powershell
+npm.cmd --prefix apps/api run evaluate:inc001 -- <PROJECT_UUID>
+```
+
+El runner importa únicamente los archivos allowlisted, espera una investigación real a través de Product API y evalúa su respuesta contra `ground-truth/INC-001.expected.json` **después** de recibirla. El archivo de referencia nunca se envía al modelo ni al pipeline de ingesta. El comando devuelve código de salida distinto de cero cuando faltan observaciones, hay citas inválidas, se detecta una afirmación factual prohibida o falla un servicio. Esta evaluación puntual no incluye persistencia de ejecuciones ni constituye el Evaluation Engine de Phase 4.
+
+Para repetir la investigación sin importar datos, añade `--skip-ingestion` después del UUID:
+
+```powershell
+npm.cmd --prefix apps/api run evaluate:inc001 -- <PROJECT_UUID> --skip-ingestion
+```
+
+Este modo realiza warm-up, readiness, búsqueda e investigación; no ejecuta la ingesta de demo.
+
+Para comprobar la idempotencia, vuelve a ejecutar el comando o repite la llamada de importación de demo; los documentos indexados deben informar deduplicación y no crear chunks ni embeddings adicionales. Para verificar persistencia, reinicia Product API y el AI Orchestrator sin detener ni eliminar el volumen PostgreSQL y repite la investigación. No uses `docker compose down -v`.
 
 ### Ejecutar las pruebas
 
@@ -428,7 +476,7 @@ Una suite de pruebas solo debe declararse satisfactoria después de ejecutar el 
 | 1 | Base de la aplicación y persistencia | Parcialmente implementada; verificar el estado actual |
 | 2 | Generación y embeddings con modelos locales | Implementados mediante Ollama; validar con modelos reales en cada entorno |
 | 3 | Ingesta, RAG local y recuperación híbrida | Ingesta y búsqueda semántica implementadas; validación E2E y recuperación híbrida pendientes |
-| 4 | Entrenamiento y evaluación de un clasificador propio | Planeado |
+| 4 | Evaluation Engine, Observability Engine y dashboards | Bloqueada hasta que Phase 3.1 supere la puerta de aceptación |
 | 5 | Implementación y pruebas del servidor MCP independiente | Planeado |
 | 6 | Construcción del workflow de investigación de incidentes | Planeado |
 | 7 | Seguridad completa, trazas y benchmarks | Planeado |

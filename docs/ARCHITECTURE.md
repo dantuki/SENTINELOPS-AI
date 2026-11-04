@@ -239,6 +239,17 @@ El sistema deberá poder comprobar que una referencia realmente existe y que cor
 
 Un resultado de búsqueda no se considerará una prueba suficiente por sí solo.
 
+### Comportamiento implementado y límites verificados
+
+- `apps/api` ejecuta la búsqueda vectorial con restricciones explícitas por proyecto, documentos `indexed` y fuentes `active`.
+- Una investigación con `incidentId` acepta coincidencias etiquetadas con esa referencia externa y fuentes generales del mismo proyecto; no recupera fragmentos ligados a otro incidente.
+- Los umbrales actuales son `0.55` para búsquedas generales y `0.40` para investigaciones por incidente. El segundo se calibró con un fragmento de logs de INC-001 cuyo score observado fue `0.414`; ambos valores siguen siendo experimentales y no expresan probabilidad causal.
+- Los nombres originales de las métricas se serializan en el JSON de evidencia. Las instrucciones distinguen `waiting_requests`, `active_connections` e `idle_connections`, y separan el HTTP 200 de un componente del resultado de negocio.
+- El orquestador conserva `/health` como liveness. `/ready` consulta los modelos cargados en Ollama y solo responde listo cuando están presentes tanto el modelo de chat como el de embeddings. La Product API usa `/ready` para informar la disponibilidad de su dependencia de IA.
+- El runner de migraciones mantiene un registro de versión y checksum, detecta las firmas de esquema de las migraciones 001–004 ya existentes y aplica migraciones pendientes en transacciones bajo un advisory lock. No elimina ni recrea datos.
+
+La validación local de Phase 3.1 sigue bloqueada: la búsqueda y una investigación real funcionaron, pero hubo timeouts variables del modelo y no existe un segundo proyecto en la base local para una prueba E2E de aislamiento entre proyectos.
+
 ## 8. Interacción MCP
 
 La arquitectura separará el cliente MCP del servidor MCP.
