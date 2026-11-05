@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { getAiServiceAuthHeaders } from "./ai-service-auth.js";
 
 interface ChatRequestBody {
   prompt: string;
@@ -117,6 +118,7 @@ export function registerChatRoutes(
           headers: {
             accept: "application/json",
             "content-type": "application/json",
+            ...getAiServiceAuthHeaders(),
           },
           body: JSON.stringify({
             prompt: request.body.prompt,

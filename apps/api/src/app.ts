@@ -1,5 +1,13 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
+import { AuthRepository } from "./auth-repository.js";
+import { registerAuthRoutes } from "./auth-routes.js";
+import {
+  defaultSecurityConfig,
+  registerSecurityHooks,
+  type SecurityAuthStore,
+  type SecurityConfig,
+} from "./auth-security.js";
 
 export interface HealthResponse {
   status: "ok";
@@ -50,6 +58,9 @@ interface BuildAppOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   postgresHealthCheck?: () => Promise<void>;
+  authRepository?: AuthRepository;
+  securityStore?: SecurityAuthStore;
+  securityConfig?: SecurityConfig;
 }
 
 const aiDependencySchema = {
@@ -146,6 +157,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({
     logger: options.logger ?? process.env.NODE_ENV !== "test",
   });
+  const securityConfig =
+    options.securityConfig ?? defaultSecurityConfig();
+
+  registerSecurityHooks(
+    app,
+    options.authRepository ?? options.securityStore,
+    securityConfig,
+  );
+  registerAuthRoutes(app, options.authRepository, securityConfig);
 
   const aiOrchestratorUrl =
     options.aiOrchestratorUrl ??
@@ -213,7 +233,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
           return reply.code(503).send(unavailable);
         }
 
-        healthUrl = new URL("/health", baseUrl);
+        healthUrl = new URL("/ready", baseUrl);
       } catch {
         return reply.code(503).send(unavailable);
       }

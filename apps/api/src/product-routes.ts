@@ -257,13 +257,16 @@ export function registerProductRoutes(
         },
       },
     },
-    async (_request, reply) => {
+    async (request, reply) => {
       if (!store) {
         return reply.code(503).send({ error: "Persistence unavailable" });
       }
 
       try {
-        const data = await store.listWorkspaces();
+        if (!request.authUser) {
+          return reply.code(401).send({ error: "Authentication required" });
+        }
+        const data = await store.listWorkspaces(request.authUser.id);
         return reply.code(200).send({ data });
       } catch {
         return reply.code(503).send({ error: "Persistence unavailable" });
@@ -292,7 +295,13 @@ export function registerProductRoutes(
       }
 
       try {
-        const data = await store.createWorkspace(request.body);
+        if (!request.authUser) {
+          return reply.code(401).send({ error: "Authentication required" });
+        }
+        const data = await store.createWorkspace(
+          request.body,
+          request.authUser.id,
+        );
         return reply.code(201).send({ data });
       } catch (error: unknown) {
         if (isPostgresErrorCode(error, "23505")) {
@@ -330,7 +339,13 @@ export function registerProductRoutes(
       }
 
       try {
-        const data = await store.listProjects(request.params.workspaceId);
+        if (!request.authUser) {
+          return reply.code(401).send({ error: "Authentication required" });
+        }
+        const data = await store.listProjects(
+          request.params.workspaceId,
+          request.authUser.id,
+        );
 
         if (data === null) {
           return reply.code(404).send({ error: "Workspace not found" });
@@ -372,9 +387,13 @@ export function registerProductRoutes(
       }
 
       try {
+        if (!request.authUser) {
+          return reply.code(401).send({ error: "Authentication required" });
+        }
         const data = await store.createProject(
           request.params.workspaceId,
           request.body,
+          request.authUser.id,
         );
 
         if (data === null) {

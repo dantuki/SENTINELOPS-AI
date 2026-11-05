@@ -30,13 +30,3 @@ CREATE INDEX idx_document_chunks_embedding_hnsw
     WHERE embedding IS NOT NULL;
 
 COMMIT;
-SELECT column_name, udt_name
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND table_name = 'document_chunks'
-  AND column_name IN (
-      'embedding',
-      'embedding_model',
-      'embedding_updated_at'
-  )
-ORDER BY column_name;

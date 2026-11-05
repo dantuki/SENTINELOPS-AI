@@ -45,6 +45,104 @@ body::before {
   pointer-events: none;
 }
 
+.auth-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(7, 16, 24, 0.94);
+}
+
+.auth-header > a,
+.login-brand {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.auth-header > div {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-header button,
+.login-card button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid rgba(156, 230, 197, 0.35);
+  border-radius: 9px;
+  background: rgba(83, 212, 160, 0.12);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.auth-header button:disabled,
+.login-card button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  display: grid;
+  width: min(440px, 100%);
+  gap: 14px;
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(12, 23, 34, 0.94);
+}
+
+.login-card h1,
+.login-card p {
+  margin: 0;
+}
+
+.login-card p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.login-card label {
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.login-card input {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--text);
+  font: inherit;
+}
+
+.login-card input:focus-visible,
+.login-card button:focus-visible,
+.auth-header button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 a {
   color: inherit;
   text-decoration: none;

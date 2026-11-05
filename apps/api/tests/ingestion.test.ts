@@ -14,6 +14,7 @@ import {
 } from "../src/document-repository.js";
 import { buildApp } from "../src/app.js";
 import { registerIngestionRoutes } from "../src/ingestion-routes.js";
+import { createTestSecurity } from "./security-test-fixture.js";
 import type {
   CreateIncidentInput,
   IncidentRecord,
@@ -70,7 +71,15 @@ function createIngestionTestContext(
   let nextDocumentId = 1;
   let nextChunkId = 1;
 
-  const app = buildApp({ logger: false });
+  const security = createTestSecurity();
+  const app = buildApp({
+    logger: false,
+    securityStore: security.securityStore,
+    securityConfig: security.securityConfig,
+  });
+  app.addHook("onRequest", async (request, _reply) => {
+    security.addTestCredentials(request);
+  });
 
   registerIngestionRoutes(
     app,

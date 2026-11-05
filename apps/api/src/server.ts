@@ -1,4 +1,7 @@
 import { Pool } from "pg";
+import { AuthRepository } from "./auth-repository.js";
+import { assertAiServiceAuthConfiguration } from "./ai-service-auth.js";
+import { defaultSecurityConfig } from "./auth-security.js";
 import { buildApp } from "./app.js";
 import { registerChatRoutes } from "./chat-routes.js";
 import { DocumentChunkRepository } from "./chunk-repository.js";
@@ -46,6 +49,7 @@ function createPostgresPool(): Pool | undefined {
 }
 
 async function main(): Promise<void> {
+  assertAiServiceAuthConfiguration();
   const host = process.env.API_HOST ?? "127.0.0.1";
   const rawPort = process.env.API_PORT ?? "3001";
   const port = Number(rawPort);
@@ -55,8 +59,14 @@ async function main(): Promise<void> {
   }
 
   const postgresPool = createPostgresPool();
+  const authRepository = postgresPool
+    ? new AuthRepository(postgresPool)
+    : undefined;
+  const securityConfig = defaultSecurityConfig();
 
   const app = buildApp({
+    authRepository,
+    securityConfig,
     ...(postgresPool
       ? {
           postgresHealthCheck: async () => {

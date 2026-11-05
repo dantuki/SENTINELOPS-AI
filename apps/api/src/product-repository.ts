@@ -80,19 +80,22 @@ export interface EnsureIncidentResult {
 }
 
 export interface ProductStore {
-  listWorkspaces(): Promise<WorkspaceRecord[]>;
+  listWorkspaces(userId: string): Promise<WorkspaceRecord[]>;
 
   createWorkspace(
     input: CreateWorkspaceInput,
+    ownerUserId: string,
   ): Promise<WorkspaceRecord>;
 
   listProjects(
     workspaceId: string,
+    userId: string,
   ): Promise<ProjectRecord[] | null>;
 
   createProject(
     workspaceId: string,
     input: CreateProjectInput,
+    creatorUserId: string,
   ): Promise<ProjectRecord | null>;
 
   listIncidents(
@@ -143,39 +146,77 @@ const INCIDENT_COLUMNS = `
 export class ProductRepository implements ProductStore {
   constructor(private readonly pool: Pool) {}
 
-  async listWorkspaces(): Promise<WorkspaceRecord[]> {
+  async listWorkspaces(userId: string): Promise<WorkspaceRecord[]> {
     const result = await this.pool.query<WorkspaceRecord>(`
       SELECT ${WORKSPACE_COLUMNS}
       FROM workspaces
+      WHERE EXISTS (
+        SELECT 1
+        FROM workspace_memberships
+        WHERE workspace_id = workspaces.id
+          AND user_id = $1::uuid
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM users
+        WHERE id = $1::uuid
+          AND is_active
+          AND instance_role = 'INSTANCE_ADMIN'
+      )
       ORDER BY created_at DESC, id ASC
-    `);
+    `, [userId]);
 
     return result.rows;
   }
 
   async createWorkspace(
     input: CreateWorkspaceInput,
+    ownerUserId: string,
   ): Promise<WorkspaceRecord> {
-    const result = await this.pool.query<WorkspaceRecord>(
-      `
-        INSERT INTO workspaces (slug, name)
-        VALUES ($1, $2)
-        RETURNING ${WORKSPACE_COLUMNS}
-      `,
-      [input.slug, input.name],
-    );
-
-    const workspace = result.rows[0];
-
-    if (!workspace) {
-      throw new Error("Workspace insert returned no row");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<WorkspaceRecord>(
+        `
+          INSERT INTO workspaces (slug, name)
+          VALUES ($1, $2)
+          RETURNING ${WORKSPACE_COLUMNS}
+        `,
+        [input.slug, input.name],
+      );
+      const workspace = result.rows[0];
+      if (!workspace) {
+        throw new Error("Workspace insert returned no row");
+      }
+      await client.query(
+        `
+          INSERT INTO workspace_memberships (workspace_id, user_id, role)
+          VALUES ($1::uuid, $2::uuid, 'WORKSPACE_OWNER')
+        `,
+        [workspace.id, ownerUserId],
+      );
+      await client.query(
+        `
+          INSERT INTO security_audit_events (
+            actor_user_id, action, resource_type, resource_id, outcome
+          )
+          VALUES ($1::uuid, 'workspace.created', 'workspace', $2, 'success')
+        `,
+        [ownerUserId, workspace.id],
+      );
+      await client.query("COMMIT");
+      return workspace;
+    } catch (error: unknown) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
-
-    return workspace;
   }
 
   async listProjects(
     workspaceId: string,
+    userId: string,
   ): Promise<ProjectRecord[] | null> {
     const workspaceResult = await this.pool.query(
       "SELECT 1 FROM workspaces WHERE id = $1::uuid",
@@ -191,9 +232,21 @@ export class ProductRepository implements ProductStore {
         SELECT ${PROJECT_COLUMNS}
         FROM projects
         WHERE workspace_id = $1::uuid
+          AND (
+            EXISTS (
+              SELECT 1 FROM workspace_memberships
+              WHERE workspace_id = projects.workspace_id
+                AND user_id = $2::uuid
+                AND role = 'WORKSPACE_OWNER'
+            )
+            OR EXISTS (
+              SELECT 1 FROM project_memberships
+              WHERE project_id = projects.id AND user_id = $2::uuid
+            )
+          )
         ORDER BY created_at DESC, id ASC
       `,
-      [workspaceId],
+      [workspaceId, userId],
     );
 
     return result.rows;
@@ -202,29 +255,62 @@ export class ProductRepository implements ProductStore {
   async createProject(
     workspaceId: string,
     input: CreateProjectInput,
+    creatorUserId: string,
   ): Promise<ProjectRecord | null> {
-    const result = await this.pool.query<ProjectRecord>(
-      `
-        INSERT INTO projects (
-          workspace_id,
-          slug,
-          name,
-          description
-        )
-        SELECT $1::uuid, $2, $3, $4
-        FROM workspaces
-        WHERE id = $1::uuid
-        RETURNING ${PROJECT_COLUMNS}
-      `,
-      [
-        workspaceId,
-        input.slug,
-        input.name,
-        input.description ?? null,
-      ],
-    );
-
-    return result.rows[0] ?? null;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<ProjectRecord>(
+        `
+          INSERT INTO projects (
+            workspace_id,
+            slug,
+            name,
+            description
+          )
+          SELECT $1::uuid, $2, $3, $4
+          FROM workspaces
+          WHERE id = $1::uuid
+          RETURNING ${PROJECT_COLUMNS}
+        `,
+        [
+          workspaceId,
+          input.slug,
+          input.name,
+          input.description ?? null,
+        ],
+      );
+      const project = result.rows[0];
+      if (!project) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      await client.query(
+        `
+          INSERT INTO project_memberships (
+            project_id, workspace_id, user_id, role
+          )
+          VALUES ($1::uuid, $2::uuid, $3::uuid, 'PROJECT_ADMIN')
+        `,
+        [project.id, workspaceId, creatorUserId],
+      );
+      await client.query(
+        `
+          INSERT INTO security_audit_events (
+            actor_user_id, action, resource_type, resource_id, outcome
+          )
+          VALUES ($1::uuid, 'project.created', 'project', $2, 'success')
+        `,
+        [creatorUserId, project.id],
+      );
+      await client.query("COMMIT");
+      return project;
+    } catch (error: unknown) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listIncidents(
