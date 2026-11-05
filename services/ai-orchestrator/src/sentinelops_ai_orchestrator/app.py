@@ -3,12 +3,13 @@
 import logging
 import math
 import os
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -113,6 +114,42 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+
+async def require_internal_service_auth(
+    authorization: str | None = Header(default=None),
+) -> None:
+    """Require the configured API-to-orchestrator bearer secret."""
+    environment = os.environ.get("SENTINELOPS_ENV")
+    if environment not in {"development", "production"}:
+        raise HTTPException(
+            status_code=503,
+            detail="Internal service environment is not configured.",
+        )
+    expected = os.environ.get("AI_ORCHESTRATOR_API_KEY")
+    if not expected:
+        if environment == "production":
+            raise HTTPException(
+                status_code=503,
+                detail="Internal service authentication is unavailable.",
+            )
+        return
+    if len(expected) < 32:
+        raise HTTPException(
+            status_code=503,
+            detail="Internal service authentication is misconfigured.",
+        )
+
+    provided = (
+        authorization.removeprefix("Bearer ").strip()
+        if authorization
+        else ""
+    )
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Internal service authentication failed.",
+        )
 
 
 @app.get(
@@ -374,6 +411,7 @@ def get_embedding_generator() -> EmbeddingGenerator:
 )
 async def create_embeddings(
     payload: EmbeddingRequest,
+    _service_auth: None = Depends(require_internal_service_auth),
     generator: EmbeddingGenerator = Depends(get_embedding_generator),
 ) -> EmbeddingResponse:
     """Return one 1024-dimensional vector for each input text."""
@@ -629,6 +667,7 @@ def get_local_chat_generator() -> LocalChatGenerator:
     summary="Load and verify the configured local models",
 )
 async def warm_up_models(
+    _service_auth: None = Depends(require_internal_service_auth),
     embedding_generator: EmbeddingGenerator = Depends(
         get_embedding_generator
     ),
@@ -710,6 +749,7 @@ async def warm_up_models(
 )
 async def create_chat_response(
     payload: ChatRequest,
+    _service_auth: None = Depends(require_internal_service_auth),
     generator: LocalChatGenerator = Depends(get_local_chat_generator),
 ) -> ChatResponse:
     """Generate a response without exposing internal thinking output."""

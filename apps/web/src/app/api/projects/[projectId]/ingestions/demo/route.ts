@@ -5,7 +5,7 @@ import {
 } from "@/lib/product-api";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
@@ -18,5 +18,6 @@ export async function POST(
     `/api/projects/${encodeURIComponent(projectId)}/ingestions/demo`,
     { method: "POST" },
     150_000,
+    request,
   );
 }

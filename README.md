@@ -165,6 +165,7 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 | Importación de INC-001 | Los dos archivos allowlisted se indexaron; reintentar no creó chunks ni embeddings duplicados |
 | Investigación E2E con persistencia real | La búsqueda recupera evidencia, pero la última evaluación factual no alcanzó la cobertura requerida |
 | Readiness del orquestador | `/health` es liveness; `/ready` comprueba que los dos modelos requeridos estén cargados |
+| Fundamentos de autenticación | Fase Security Foundation implementada en código; verificación de aislamiento PostgreSQL y despliegue pendiente |
 | Evaluación factual determinista | Incluye nueve reglas de factualidad para INC-001; no sustituye un benchmark completo |
 | Clasificador de incidentes entrenado | Planeado |
 | Servidor MCP independiente | Implementación y pruebas de protocolo pendientes de verificación |
@@ -290,6 +291,8 @@ Los controles previstos incluyen:
 La detección de prompt injection por sí sola no se considera una defensa suficiente. Los permisos, el aislamiento de datos, las restricciones de herramientas y la validación determinista deben imponerse desde la aplicación.
 
 El sistema no se considerará seguro para producción únicamente por utilizar Docker, HTTPS o un modelo local. Los controles de seguridad deben verificarse mediante pruebas.
+
+La configuración operativa de autenticación, sesiones, roles, bootstrap y límites pendientes se describe en [Fundamentos de autenticación y autorización](docs/SECURITY-FOUNDATION.md). Las decisiones de arquitectura correspondientes están registradas en [ADR-0005](docs/adr/0005-autenticacion-sesiones-y-rbac.md).
 
 ## Pruebas y evaluación
 

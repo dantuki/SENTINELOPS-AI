@@ -84,8 +84,12 @@ class FakeOllamaAsyncClient:
 
 
 @pytest.fixture(autouse=True)
-def clear_dependency_overrides() -> AsyncIterator[None]:
+def clear_dependency_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[None]:
     """Ensure one test's dependency overrides do not affect another."""
+    monkeypatch.setenv("SENTINELOPS_ENV", "development")
+    monkeypatch.delenv("AI_ORCHESTRATOR_API_KEY", raising=False)
     app.dependency_overrides.clear()
     yield
     app.dependency_overrides.clear()
@@ -132,6 +136,43 @@ def test_readiness_endpoint_returns_503_when_a_model_is_not_loaded() -> None:
     assert response.json() == {
         "detail": "Required local models are not loaded."
     }
+
+
+def test_internal_service_routes_reject_missing_service_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ORCHESTRATOR_API_KEY", "a" * 32)
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "status"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_internal_service_routes_require_an_explicit_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SENTINELOPS_ENV", raising=False)
+
+    response = client.post("/warmup")
+
+    assert response.status_code == 503
+
+
+def test_internal_service_routes_reject_short_configured_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ORCHESTRATOR_API_KEY", "too-short")
+
+    response = client.post(
+        "/chat",
+        json={"prompt": "status"},
+        headers={"Authorization": "Bearer too-short"},
+    )
+
+    assert response.status_code == 503
 
 
 def test_warmup_loads_and_verifies_both_configured_models(

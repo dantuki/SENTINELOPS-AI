@@ -32,6 +32,14 @@ const trackedTables = [
   "investigations",
   "evidence_records",
 ];
+const securityTables = [
+  "users",
+  "sessions",
+  "workspace_memberships",
+  "project_memberships",
+  "security_audit_events",
+  "auth_login_rate_limits",
+];
 const migrationLockId = "731029482765013";
 
 function getTransactionalSql(sql: string, filename: string): string {
@@ -161,6 +169,43 @@ async function detectMigrationState(
       "SELECT to_regclass('public.uq_incidents_project_external_reference') IS NOT NULL AS applied",
     );
     return result.rows[0]?.applied ? "applied" : "pending";
+  }
+
+  if (migration.version === "007") {
+    const result = await client.query<{
+      existing: number;
+      hasProjectWorkspaceConstraint: boolean;
+    }>(
+      `
+        SELECT
+          (
+            SELECT count(*)::integer
+            FROM unnest($1::text[]) AS expected(table_name)
+            WHERE to_regclass('public.' || expected.table_name) IS NOT NULL
+          ) AS existing,
+          EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = to_regclass('public.projects')
+              AND conname = 'uq_projects_id_workspace'
+          ) AS "hasProjectWorkspaceConstraint"
+      `,
+      [securityTables],
+    );
+    const existing = result.rows[0]?.existing ?? 0;
+    const hasProjectWorkspaceConstraint =
+      result.rows[0]?.hasProjectWorkspaceConstraint ?? false;
+
+    if (
+      existing === securityTables.length &&
+      hasProjectWorkspaceConstraint
+    ) {
+      return "applied";
+    }
+
+    return existing === 0 && !hasProjectWorkspaceConstraint
+      ? "pending"
+      : "partial";
   }
 
   return "pending";

@@ -6,12 +6,13 @@
   "description": "API de producto de SentinelOps AI",
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --import=tsx --watch src/server.ts",
+    "admin": "node --env-file-if-exists=../../.env --import=tsx src/admin.ts",
     "evaluate:inc001": "node --env-file-if-exists=../../.env --import=tsx src/evaluate-inc001.ts",
     "migrate": "node --env-file-if-exists=../../.env --import=tsx src/migrate.ts",
     "test:project-isolation": "node --env-file-if-exists=../../.env --import=tsx --test tests/project-isolation.integration.test.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
-    "test": "tsx --test tests/app.test.ts tests/ingestion.test.ts tests/inc001-evaluation.test.ts",
+    "test": "tsx --test tests/app.test.ts tests/ingestion.test.ts tests/inc001-evaluation.test.ts tests/auth-security.test.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

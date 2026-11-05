@@ -1,3 +1,5 @@
+import { getAiServiceAuthHeaders } from "./ai-service-auth.js";
+
 export const EMBEDDING_DIMENSIONS = 1024;
 
 export interface EmbeddingClientOptions {
@@ -120,6 +122,7 @@ export async function requestEmbeddings(
       headers: {
         accept: "application/json",
         "content-type": "application/json",
+        ...getAiServiceAuthHeaders(),
       },
       body: JSON.stringify({ texts }),
       signal: AbortSignal.timeout(timeoutMs),

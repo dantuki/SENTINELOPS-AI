@@ -18,6 +18,12 @@ interface GroundTruthReference extends Inc001GroundTruth {
   incident_id: string;
 }
 
+interface EvaluationSession {
+  cookie: string;
+  csrfToken: string;
+  origin: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
     typeof value === "object" &&
@@ -101,12 +107,16 @@ function parseInvestigation(value: unknown): InvestigationData {
 async function postJson(
   url: URL,
   payload: Record<string, unknown>,
+  session: EvaluationSession,
 ): Promise<unknown> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
       accept: "application/json",
       "content-type": "application/json",
+      cookie: session.cookie,
+      origin: session.origin,
+      "x-csrf-token": session.csrfToken,
     },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(120_000),
@@ -119,6 +129,95 @@ async function postJson(
   }
 
   return response.json();
+}
+
+async function authenticateForEvaluation(
+  apiBase: URL,
+): Promise<EvaluationSession> {
+  const email = process.env.SENTINELOPS_EVAL_EMAIL;
+  const password = process.env.SENTINELOPS_EVAL_PASSWORD;
+  if (!email || !password) {
+    throw new Error(
+      "Set SENTINELOPS_EVAL_EMAIL and SENTINELOPS_EVAL_PASSWORD for an authorized investigator account.",
+    );
+  }
+  const origin =
+    process.env.APP_ORIGIN ?? "http://127.0.0.1:3000";
+  const response = await fetch(new URL("/api/auth/login", apiBase), {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      origin,
+    },
+    body: JSON.stringify({ email, password }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Evaluation account authentication failed with HTTP ${response.status}.`,
+    );
+  }
+
+  const cookies = response.headers.getSetCookie();
+  const sessionCookie = cookies
+    .map((cookie) => cookie.split(";", 1)[0]!)
+    .find((cookie) =>
+      cookie.startsWith("__Host-sentinel_session=") ||
+      cookie.startsWith("sentinel_session="),
+    );
+  const csrfCookie = cookies
+    .map((cookie) => cookie.split(";", 1)[0]!)
+    .find((cookie) =>
+      cookie.startsWith("__Host-sentinel_csrf=") ||
+      cookie.startsWith("sentinel_csrf="),
+    );
+  if (!sessionCookie || !csrfCookie) {
+    throw new Error("Authentication response did not include session cookies.");
+  }
+  const csrfToken = csrfCookie.slice(csrfCookie.indexOf("=") + 1);
+  return {
+    cookie: `${sessionCookie}; ${csrfCookie}`,
+    csrfToken,
+    origin,
+  };
+}
+
+async function withEvaluationSession(
+  apiBase: URL,
+  session: EvaluationSession,
+  action: () => Promise<void>,
+): Promise<void> {
+  let actionFailed = false;
+  try {
+    await action();
+  } catch (error: unknown) {
+    actionFailed = true;
+    throw error;
+  } finally {
+    try {
+      const response = await fetch(new URL("/api/auth/logout", apiBase), {
+        method: "POST",
+        headers: {
+          cookie: session.cookie,
+          origin: session.origin,
+          "x-csrf-token": session.csrfToken,
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Evaluation session logout failed with HTTP ${response.status}.`,
+        );
+      }
+    } catch (error: unknown) {
+      if (actionFailed) {
+        console.error("The evaluation session could not be revoked.");
+      } else {
+        throw error;
+      }
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -157,8 +256,10 @@ async function main(): Promise<void> {
   }
 
   const warmupStartedAt = performance.now();
+  const aiAuthKey = process.env.AI_ORCHESTRATOR_API_KEY;
   const warmupResponse = await fetch(new URL("/warmup", aiBase), {
     method: "POST",
+    headers: aiAuthKey ? { authorization: `Bearer ${aiAuthKey}` } : {},
     signal: AbortSignal.timeout(120_000),
   });
   if (!warmupResponse.ok) {
@@ -178,12 +279,32 @@ async function main(): Promise<void> {
     );
   }
 
+  const session = await authenticateForEvaluation(apiBase);
+  await withEvaluationSession(apiBase, session, () =>
+    runEvaluation(
+      apiBase,
+      session,
+      projectId,
+      skipIngestion,
+      warmupDurationMs,
+    ),
+  );
+}
+
+async function runEvaluation(
+  apiBase: URL,
+  session: EvaluationSession,
+  projectId: string,
+  skipIngestion: boolean,
+  warmupDurationMs: number,
+): Promise<void> {
   let ingestionDurationMs: number | null = null;
   if (!skipIngestion) {
     const ingestionStartedAt = performance.now();
     const ingestion = await postJson(
       new URL(`/api/projects/${projectId}/ingestions/demo`, apiBase),
       {},
+      session,
     );
     if (
       !isRecord(ingestion) ||
@@ -213,6 +334,7 @@ async function main(): Promise<void> {
         incidentId: "INC-001",
         limit: 5,
       },
+      session,
     ),
   );
   const investigationDurationMs =

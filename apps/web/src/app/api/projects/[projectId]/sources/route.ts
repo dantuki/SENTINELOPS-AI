@@ -5,7 +5,7 @@ import {
 } from "@/lib/product-api";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ projectId: string }> },
 ) {
   const { projectId } = await context.params;
@@ -16,5 +16,8 @@ export async function GET(
 
   return forwardProductApi(
     `/api/projects/${encodeURIComponent(projectId)}/sources`,
+    {},
+    8_000,
+    request,
   );
 }

@@ -550,12 +550,12 @@ El hecho de describir una medida en este documento no significa que esté implem
 
 ## 13. Estado de seguridad actual
 
-- Modelo de amenazas documentado: pendiente de confirmar tras guardar este archivo.
-- Autenticación implementada: no.
-- Aislamiento probado entre proyectos: no.
+- Modelo de amenazas documentado: sí; su vigencia debe revisarse conforme evolucione el producto.
+- Autenticación y sesiones locales: implementadas en la fase Security Foundation; pendientes de validación integral en una base aislada.
+- Políticas HTTP y RBAC por workspace/proyecto: implementados en la API; el aislamiento de datos debe verificarse además con pruebas de integración PostgreSQL.
 - Guardrails de entrada y salida implementados: no.
 - Herramientas MCP implementadas: no.
-- Pruebas de seguridad ejecutadas: no.
+- Pruebas de seguridad ejecutadas: parcialmente; hay pruebas unitarias de los hooks, pero no se ha verificado el aislamiento en PostgreSQL.
 - VPS configurado: no.
 - Backups y restauración verificados: no.
 

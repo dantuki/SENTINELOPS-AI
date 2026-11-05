@@ -31,13 +31,23 @@ import type {
   ProjectSourceRecord,
 } from "../src/source-repository.js";
 import { registerSourceRoutes } from "../src/source-routes.js";
+import { createTestSecurity } from "./security-test-fixture.js";
 
 const apps: FastifyInstance[] = [];
 
 function createTestApp(
   options: Parameters<typeof buildApp>[0] = {},
 ): FastifyInstance {
-  const app = buildApp({ logger: false, ...options });
+  const security = createTestSecurity();
+  const app = buildApp({
+    logger: false,
+    securityStore: security.securityStore,
+    securityConfig: security.securityConfig,
+    ...options,
+  });
+  app.addHook("onRequest", async (request, _reply) => {
+    security.addTestCredentials(request);
+  });
   apps.push(app);
   return app;
 }

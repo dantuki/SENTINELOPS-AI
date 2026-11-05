@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { getAiServiceAuthHeaders } from "./ai-service-auth.js";
 
 import type {
   SemanticSearchChunkRecord,
@@ -325,6 +326,7 @@ export function registerInvestigationRoutes(
             headers: {
               accept: "application/json",
               "content-type": "application/json",
+              ...getAiServiceAuthHeaders(),
             },
             body: JSON.stringify({
               texts: [request.body.question],
@@ -554,6 +556,7 @@ export function registerInvestigationRoutes(
           headers: {
             accept: "application/json",
             "content-type": "application/json",
+            ...getAiServiceAuthHeaders(),
           },
           body: JSON.stringify({
             prompt: investigationPrompt,
@@ -682,6 +685,7 @@ export function registerInvestigationRoutes(
             headers: {
               accept: "application/json",
               "content-type": "application/json",
+              ...getAiServiceAuthHeaders(),
             },
             body: JSON.stringify({
               prompt: compactPrompt,
