@@ -53,6 +53,13 @@ export class EmbeddingWriteConflictError extends Error {
   }
 }
 
+export class ChunkContentConflictError extends Error {
+  constructor() {
+    super("A chunk ordinal already exists with different content.");
+    this.name = "ChunkContentConflictError";
+  }
+}
+
 function toVectorSql(embedding: number[]): string {
   if (
     embedding.length !== EMBEDDING_DIMENSIONS ||
@@ -178,6 +185,99 @@ export class DocumentChunkRepository {
     );
 
     return result.rows[0] ?? null;
+  }
+
+  async createOrGetForDocument(
+    projectId: string,
+    documentId: string,
+    input: CreateDocumentChunkInput,
+  ): Promise<{ chunk: DocumentChunkRecord; created: boolean } | null> {
+    const inserted = await this.pool.query<DocumentChunkRecord>(
+      `
+        INSERT INTO document_chunks (
+          project_id,
+          document_id,
+          ordinal,
+          content,
+          token_count,
+          start_offset,
+          end_offset,
+          metadata
+        )
+        SELECT
+          $1::uuid,
+          document.id,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8::jsonb
+        FROM documents AS document
+        WHERE document.id = $2::uuid
+          AND document.project_id = $1::uuid
+        ON CONFLICT (document_id, ordinal)
+        DO NOTHING
+        RETURNING
+          id,
+          project_id AS "projectId",
+          document_id AS "documentId",
+          ordinal,
+          content,
+          token_count AS "tokenCount",
+          start_offset AS "startOffset",
+          end_offset AS "endOffset",
+          metadata,
+          created_at AS "createdAt"
+      `,
+      [
+        projectId,
+        documentId,
+        input.ordinal,
+        input.content,
+        input.tokenCount ?? null,
+        input.startOffset ?? null,
+        input.endOffset ?? null,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
+
+    const chunk = inserted.rows[0];
+    if (chunk) {
+      return { chunk, created: true };
+    }
+
+    const existing = await this.pool.query<DocumentChunkRecord>(
+      `
+        SELECT
+          id,
+          project_id AS "projectId",
+          document_id AS "documentId",
+          ordinal,
+          content,
+          token_count AS "tokenCount",
+          start_offset AS "startOffset",
+          end_offset AS "endOffset",
+          metadata,
+          created_at AS "createdAt"
+        FROM document_chunks
+        WHERE project_id = $1::uuid
+          AND document_id = $2::uuid
+          AND ordinal = $3
+      `,
+      [projectId, documentId, input.ordinal],
+    );
+
+    const existingChunk = existing.rows[0];
+    if (!existingChunk) {
+      return null;
+    }
+
+    if (existingChunk.content !== input.content) {
+      throw new ChunkContentConflictError();
+    }
+
+    return { chunk: existingChunk, created: false };
   }
 
   async listWithoutEmbeddingsForDocument(
@@ -324,20 +424,29 @@ export class DocumentChunkRepository {
     const result = await this.pool.query<SemanticSearchChunkRecord>(
       `
         SELECT
-          id,
-          project_id AS "projectId",
-          document_id AS "documentId",
-          ordinal,
-          content,
-          (1 - (embedding <=> $2::vector))::double precision AS score
-        FROM document_chunks
-        WHERE project_id = $1::uuid
-          AND embedding IS NOT NULL
+          chunk.id,
+          chunk.project_id AS "projectId",
+          chunk.document_id AS "documentId",
+          chunk.ordinal,
+          chunk.content,
+          (1 - (chunk.embedding <=> $2::vector))::double precision AS score
+        FROM document_chunks AS chunk
+        JOIN documents AS document
+          ON document.id = chunk.document_id
+          AND document.project_id = chunk.project_id
+        JOIN project_sources AS source
+          ON source.id = document.source_id
+          AND source.project_id = document.project_id
+        WHERE chunk.project_id = $1::uuid
+          AND document.status = 'indexed'
+          AND source.status = 'active'
+          AND chunk.embedding IS NOT NULL
           AND (
             $4::text IS NULL
-            OR metadata ->> 'incidentId' = $4::text
+            OR chunk.metadata ->> 'incidentId' IS NULL
+            OR chunk.metadata ->> 'incidentId' = $4::text
           )
-        ORDER BY embedding <=> $2::vector ASC
+        ORDER BY chunk.embedding <=> $2::vector ASC
         LIMIT $3
       `,
       [

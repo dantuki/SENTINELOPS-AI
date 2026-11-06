@@ -33,8 +33,39 @@ export interface CreateProjectSourceInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface EnsureProjectSourceResult {
+  source: ProjectSourceRecord;
+  created: boolean;
+}
+
 export class ProjectSourceRepository {
   constructor(private readonly pool: Pool) {}
+
+  async getForProject(
+    projectId: string,
+    sourceId: string,
+  ): Promise<ProjectSourceRecord | null> {
+    const result = await this.pool.query<ProjectSourceRecord>(
+      `
+        SELECT
+          id,
+          project_id AS "projectId",
+          source_type AS "sourceType",
+          name,
+          locator,
+          status,
+          metadata,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM project_sources
+        WHERE project_id = $1::uuid
+          AND id = $2::uuid
+      `,
+      [projectId, sourceId],
+    );
+
+    return result.rows[0] ?? null;
+  }
 
   async listForProject(
     projectId: string,
@@ -112,5 +143,90 @@ export class ProjectSourceRepository {
     );
 
     return result.rows[0] ?? null;
+  }
+
+  async ensureForProject(
+    projectId: string,
+    input: CreateProjectSourceInput,
+  ): Promise<EnsureProjectSourceResult | null> {
+    const result = await this.pool.query<ProjectSourceRecord>(
+      `
+        INSERT INTO project_sources (
+          project_id,
+          source_type,
+          name,
+          locator,
+          metadata
+        )
+        SELECT $1::uuid, $2, $3, $4, $5::jsonb
+        FROM projects
+        WHERE id = $1::uuid
+        ON CONFLICT (project_id, source_type, locator)
+        DO NOTHING
+        RETURNING
+          id,
+          project_id AS "projectId",
+          source_type AS "sourceType",
+          name,
+          locator,
+          status,
+          metadata,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+      `,
+      [
+        projectId,
+        input.sourceType,
+        input.name,
+        input.locator,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
+
+    if (result.rows[0]) {
+      return { source: result.rows[0], created: true };
+    }
+
+    const existing = await this.pool.query<ProjectSourceRecord>(
+      `
+        SELECT
+          id,
+          project_id AS "projectId",
+          source_type AS "sourceType",
+          name,
+          locator,
+          status,
+          metadata,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM project_sources
+        WHERE project_id = $1::uuid
+          AND source_type = $2
+          AND locator = $3
+      `,
+      [projectId, input.sourceType, input.locator],
+    );
+
+    const source = existing.rows[0];
+    return source ? { source, created: false } : null;
+  }
+
+  async activateIfEnabled(
+    projectId: string,
+    sourceId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        UPDATE project_sources
+        SET status = 'active'
+        WHERE id = $1::uuid
+          AND project_id = $2::uuid
+          AND status <> 'disabled'
+        RETURNING id
+      `,
+      [sourceId, projectId],
+    );
+
+    return result.rows.length === 1;
   }
 }

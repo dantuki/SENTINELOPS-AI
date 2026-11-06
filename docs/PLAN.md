@@ -6,7 +6,7 @@
 
 - **Proyecto:** SentinelOps AI
 - **Objetivo:** construir una plataforma de investigación y diagnóstico de incidentes de software mediante RAG, herramientas MCP, workflows de IA y mecanismos de verificación.
-- **Estado actual:** planificación e inspección inicial.
+- **Estado actual:** Phase 3.1 implementada parcialmente y bloqueada por la puerta de aceptación.
 - **Repositorio:** https://github.com/dantuki/SENTINELOPS-AI
 - **Rama inicial:** `main`
 
@@ -14,6 +14,14 @@
 Este documento define las fases de trabajo, los entregables y los criterios que deben cumplirse antes de considerar terminada una fase.
 
 Los estados y resultados se actualizarán únicamente cuando exista evidencia del trabajo realizado.
+
+## Estado de ejecución actualizado — 3 de noviembre de 2026
+
+**PHASE 3.1: BLOCKED.** PostgreSQL y pgvector reales estuvieron disponibles; el runner registró las migraciones 001–004 detectadas por sus firmas y aplicó 005–006. Los conteos de datos existentes se conservaron durante las migraciones. La importación real de INC-001 indexó dos documentos y la repetición no creó chunks ni embeddings duplicados.
+
+La prueba de aislamiento pasó en una base PostgreSQL separada con datos sintéticos; la base original contiene un solo proyecto y no se modificó para sembrar otro. Una evaluación factual de solo lectura recuperó todas las observaciones, pero la respuesta cubrió solo 1/6 y afirmó una causa raíz no demostrada. La latencia de esa investigación fue 11.5 segundos y los conteos de la base original permanecieron iguales. No se cumplen todos los criterios de aceptación.
+
+**Phase 4 no ha comenzado.** No iniciar Evaluation Engine, Observability Engine ni dashboards hasta que Phase 3.1 supere la puerta de aceptación con pruebas reproducibles. La matriz de estado detallada y los comandos ejecutados están en `docs/TEST-PLAN.md`.
 
 ## 2. Estado inicial verificado
 

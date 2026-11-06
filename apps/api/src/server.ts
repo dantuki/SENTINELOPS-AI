@@ -1,4 +1,7 @@
 import { Pool } from "pg";
+import { AuthRepository } from "./auth-repository.js";
+import { assertAiServiceAuthConfiguration } from "./ai-service-auth.js";
+import { defaultSecurityConfig } from "./auth-security.js";
 import { buildApp } from "./app.js";
 import { registerChatRoutes } from "./chat-routes.js";
 import { DocumentChunkRepository } from "./chunk-repository.js";
@@ -7,6 +10,7 @@ import { registerDocumentRoutes } from "./document-routes.js";
 import { DocumentRepository } from "./document-repository.js";
 import { registerEmbeddingRoutes } from "./embedding-routes.js";
 import { registerInvestigationRoutes } from "./investigation-routes.js";
+import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerSourceRoutes } from "./source-routes.js";
@@ -45,6 +49,7 @@ function createPostgresPool(): Pool | undefined {
 }
 
 async function main(): Promise<void> {
+  assertAiServiceAuthConfiguration();
   const host = process.env.API_HOST ?? "127.0.0.1";
   const rawPort = process.env.API_PORT ?? "3001";
   const port = Number(rawPort);
@@ -54,8 +59,14 @@ async function main(): Promise<void> {
   }
 
   const postgresPool = createPostgresPool();
+  const authRepository = postgresPool
+    ? new AuthRepository(postgresPool)
+    : undefined;
+  const securityConfig = defaultSecurityConfig();
 
   const app = buildApp({
+    authRepository,
+    securityConfig,
     ...(postgresPool
       ? {
           postgresHealthCheck: async () => {
@@ -86,6 +97,15 @@ async function main(): Promise<void> {
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);
   registerEmbeddingRoutes(app, chunkRepository);
+  registerIngestionRoutes(
+    app,
+    {
+      sources: sourceRepository,
+      documents: documentRepository,
+      chunks: chunkRepository,
+      incidents: productRepository,
+    },
+  );
   registerInvestigationRoutes(app, chunkRepository);
   registerChatRoutes(app);
 

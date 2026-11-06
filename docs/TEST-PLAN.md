@@ -9,7 +9,7 @@ El objetivo es verificar la funcionalidad, integración, seguridad y calidad de 
 
 Las pruebas deberán demostrar comportamientos concretos. No se considerará suficiente que una pantalla parezca funcionar o que un modelo produzca una respuesta convincente.
 
-**Estado:** plan inicial. Las pruebas se implementarán y ejecutarán durante las fases correspondientes.
+**Estado:** plan vigente; ver el registro de ejecución al final para resultados reales y pendientes.
 
 ## 2. Principios
 
@@ -101,6 +101,13 @@ Se validarán los siguientes casos:
 | Consulta pertinente | Se recuperan documentos relevantes del proyecto autorizado |
 | Consulta sin respaldo | Se obtiene un resultado vacío o insuficiente, sin inventar evidencia |
 | Documentos de otros proyectos | No se devuelven a usuarios sin autorización |
+| Repetición del mismo contenido | Se reutiliza el documento y no se generan embeddings duplicados |
+| Documento aún en procesamiento | Se informa que el trabajo sigue pendiente, sin afirmar que está indexado |
+| Documento archivado | Se rechaza la reingesta y no se afirma que se reindexó |
+| Fuente deshabilitada | La ingesta y los reintentos no la reactivan |
+| Timeout del proveedor de embeddings | Se conserva un estado reintentable y se informa el timeout |
+| Fuente inactiva o documento sin indexar | Sus fragmentos no aparecen en los resultados |
+| Búsqueda de incidente con documentos generales | Puede incluir evidencia del proyecto que no esté ligada a otro incidente |
 
 Se comprobará también que las referencias identifican documentos y ubicaciones reales.
 
@@ -328,11 +335,42 @@ Estados permitidos:
 ## 15. Estado actual
 
 - Plan de pruebas documentado: sí.
-- Suite de pruebas implementada: no.
-- Suite de pruebas ejecutada: no.
+- Pruebas Product API ejecutadas: 78 aprobadas.
+- Pruebas del AI Orchestrator ejecutadas: 26 aprobadas.
+- Typecheck de Product API: aprobado.
+- Migraciones PostgreSQL 001–006: esquema e índices verificados.
 - Integración MCP verificada: no.
-- Pipeline RAG verificado: no.
+- Pipeline RAG con PostgreSQL real: parcialmente verificado; puerta E2E pendiente.
 - Pruebas de seguridad ejecutadas: no.
-- Benchmark de IA ejecutado: no.
+- Casos deterministas de factualidad INC-001: implementados y aprobados.
+- Runner reproducible para factualidad de INC-001: ejecutado en modo `--skip-ingestion`; la ejecución real no alcanzó la aceptación.
 
-Estos estados cambiarán únicamente cuando existan implementaciones y resultados verificables.
+### Registro de ejecución — 3 de noviembre de 2026
+
+Las siguientes pruebas se ejecutaron localmente contra el repositorio y no deben interpretarse como resultados de producción:
+
+| Comprobación | Resultado |
+|---|---|
+| `npm.cmd test` (desde `apps/api`) | 78 aprobadas |
+| `npm.cmd run typecheck` (desde `apps/api`) | Aprobado |
+| `.\.venv\Scripts\python.exe -m pytest tests/test_app.py -q` (desde `services/ai-orchestrator`) | 26 aprobadas |
+| `npm.cmd --prefix apps/api run migrate` | Registró las firmas legadas 001–004 y aplicó 005–006; una repetición indicó que todo estaba actualizado |
+| PostgreSQL / pgvector | PostgreSQL 18.6 y pgvector 0.8.7 disponibles |
+| Persistencia durante migraciones | Conteos previos y posteriores iguales: 1 workspace, 1 proyecto, 1 incidente, 2 fuentes, 3 documentos, 3 chunks y 3 embeddings |
+| Importación real de INC-001 | Dos documentos indexados; reintento serial deduplicado con cero chunks y embeddings nuevos |
+| Búsqueda semántica real | Recuperó logs y código sintético del proyecto; los resultados conservaron sus IDs y scores |
+| Ground truth | No aparece en la lista allowlisted ni entre los documentos ingeridos |
+| Readiness del AI Orchestrator | `/health` comprueba liveness; `/ready` confirmó que ambos modelos estaban cargados |
+| Aislamiento entre proyectos | Prueba de integración aprobada en una base PostgreSQL aislada con datos sintéticos; no se sembró la base original |
+| Evaluación factual de solo lectura (`--skip-ingestion`) | Recall de recuperación 1.0; cobertura de respuesta 1/6; una afirmación causal no demostrada; resultado fallido |
+| Integridad de la base original durante la evaluación | Conteos antes y después iguales: 1 workspace, 1 proyecto, 2 incidentes, 3 fuentes, 5 documentos, 5 fragmentos y 5 embeddings |
+| Investigación y recursos locales | Última investigación: 11.5 s; GPU hasta 100 %, VRAM hasta 5.6/6 GiB, RAM disponible mínima 6.1 GiB |
+| Respuesta truncada por límite de tokens | AI Orchestrator la rechaza explícitamente; pruebas unitarias aprobadas |
+
+La última evaluación real recuperó todos los hechos esperados y citó evidencia válida, pero la respuesta incluyó solo 1/6 observaciones medibles y afirmó que la saturación del pool causó el fallo. La evaluación determinista detectó esa afirmación no respaldada, por lo que la ejecución falló. El tiempo de investigación fue 11.5 segundos y se utilizó `--skip-ingestion`; los conteos de la base original no cambiaron. Las respuestas truncadas por el límite de tokens ahora se rechazan explícitamente en vez de devolverse como completas.
+
+La primera inferencia medida para la generación corta tardó aproximadamente 18 segundos; la primera llamada de embeddings medida tardó aproximadamente 8 segundos. En las capturas locales, la GPU reportó entre 5.6 y 5.7 GiB usados de 6 GiB y hasta 98 % de utilización. Son mediciones puntuales bajo carga concurrente, no un benchmark sostenido.
+
+**PHASE 3.1: BLOCKED.** El aislamiento se aprobó con fixtures en una base aislada, pero la respuesta real de INC-001 no alcanzó la cobertura factual requerida y afirmó causalidad no demostrada. Phase 4 permanece pendiente.
+
+El runner reproducible se invoca como `npm.cmd --prefix apps/api run evaluate:inc001 -- <PROJECT_UUID>`. La ejecución completa no se marcó como aprobada en esta sesión porque las investigaciones reales tuvieron timeouts variables.

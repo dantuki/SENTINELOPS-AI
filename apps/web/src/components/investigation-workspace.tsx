@@ -425,6 +425,8 @@ export function InvestigationWorkspace() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [expandedEvidenceId, setExpandedEvidenceId] = useState("");
   const submissionInProgress = useRef(false);
+  const investigationRequestSequence = useRef(0);
+  const activeInvestigationController = useRef<AbortController | null>(null);
 
   const selectedWorkspace = workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -439,6 +441,15 @@ export function InvestigationWorkspace() {
   const syntheticEvidence = result
     ? isSyntheticEvidence(result.evidence)
     : false;
+
+  useEffect(
+    () => () => {
+      investigationRequestSequence.current += 1;
+      activeInvestigationController.current?.abort();
+      activeInvestigationController.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -565,6 +576,11 @@ export function InvestigationWorkspace() {
   }, [selectedProjectId, selectionRetry]);
 
   function resetInvestigation() {
+    investigationRequestSequence.current += 1;
+    activeInvestigationController.current?.abort();
+    activeInvestigationController.current = null;
+    submissionInProgress.current = false;
+    setIsSubmitting(false);
     setResult(null);
     setLastQuestion("");
     setInvestigationError("");
@@ -583,6 +599,10 @@ export function InvestigationWorkspace() {
       return;
     }
 
+    const requestId = investigationRequestSequence.current + 1;
+    investigationRequestSequence.current = requestId;
+    const controller = new AbortController();
+    activeInvestigationController.current = controller;
     submissionInProgress.current = true;
     setIsSubmitting(true);
     setInvestigationError("");
@@ -595,6 +615,7 @@ export function InvestigationWorkspace() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
+          signal: controller.signal,
           body: JSON.stringify({
             question: submittedQuestion.trim(),
             limit: 10,
@@ -628,14 +649,24 @@ export function InvestigationWorkspace() {
         );
       }
 
-      setResult(payload.data);
-      setQuestion("");
-      setExpandedEvidenceId("");
+      if (investigationRequestSequence.current === requestId) {
+        setResult(payload.data);
+        setQuestion("");
+        setExpandedEvidenceId("");
+      }
     } catch (error: unknown) {
-      setInvestigationError(getErrorMessage(error));
+      if (
+        investigationRequestSequence.current === requestId &&
+        !controller.signal.aborted
+      ) {
+        setInvestigationError(getErrorMessage(error));
+      }
     } finally {
-      submissionInProgress.current = false;
-      setIsSubmitting(false);
+      if (activeInvestigationController.current === controller) {
+        activeInvestigationController.current = null;
+        submissionInProgress.current = false;
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -710,6 +741,10 @@ export function InvestigationWorkspace() {
           >
             <span className="sidebar-icon" aria-hidden="true">IN</span>
             Investigation
+          </a>
+          <a className="sidebar-item" href="/knowledge-base">
+            <span className="sidebar-icon" aria-hidden="true">KB</span>
+            Knowledge Base
           </a>
           <div className="sidebar-divider" />
           <p className="sidebar-label">CONTEXTO ACTUAL</p>
