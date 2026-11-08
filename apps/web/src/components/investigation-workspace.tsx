@@ -57,10 +57,35 @@ interface Evidence {
   similarity: number;
 }
 
+type HypothesisStatus =
+  | "supported_unconfirmed"
+  | "unverified"
+  | "contradicted"
+  | "insufficient_evidence";
+
+interface InvestigationAnalysis {
+  summary: string;
+  summary_evidence_refs: string[];
+  observed_facts: Array<{
+    claim: string;
+    evidence_refs: string[];
+  }>;
+  hypotheses: Array<{
+    statement: string;
+    status: HypothesisStatus;
+    supporting_evidence: string[];
+    contradicting_evidence: string[];
+  }>;
+  missing_information: string[];
+  next_checks: string[];
+  limitations: string[];
+}
+
 interface InvestigationResult {
   model: string;
   response: string;
   evidence: Evidence[];
+  analysis: InvestigationAnalysis;
 }
 
 interface TimelineEvent {
@@ -174,6 +199,73 @@ function isEvidence(value: unknown): value is Evidence {
   );
 }
 
+function isEvidenceReferences(
+  value: unknown,
+  evidenceCount: number,
+  allowEmpty: boolean,
+): value is string[] {
+  return (
+    Array.isArray(value) &&
+    (allowEmpty || value.length > 0) &&
+    value.every(
+      (reference) =>
+        typeof reference === "string" &&
+        /^E[1-9]\d*$/u.test(reference) &&
+        Number(reference.slice(1)) <= evidenceCount,
+    )
+  );
+}
+
+function isInvestigationAnalysis(
+  value: unknown,
+  evidenceCount: number,
+): value is InvestigationAnalysis {
+  return (
+    isRecord(value) &&
+    typeof value.summary === "string" &&
+    value.summary.trim().length > 0 &&
+    isEvidenceReferences(value.summary_evidence_refs, evidenceCount, evidenceCount === 0) &&
+    Array.isArray(value.observed_facts) &&
+    value.observed_facts.every(
+      (fact) =>
+        isRecord(fact) &&
+        typeof fact.claim === "string" &&
+        fact.claim.trim().length > 0 &&
+        isEvidenceReferences(fact.evidence_refs, evidenceCount, false),
+    ) &&
+    Array.isArray(value.hypotheses) &&
+    value.hypotheses.every(
+      (hypothesis) =>
+        isRecord(hypothesis) &&
+        typeof hypothesis.statement === "string" &&
+        hypothesis.statement.trim().length > 0 &&
+        [
+          "supported_unconfirmed",
+          "unverified",
+          "contradicted",
+          "insufficient_evidence",
+        ].includes(String(hypothesis.status)) &&
+        isEvidenceReferences(
+          hypothesis.supporting_evidence,
+          evidenceCount,
+          true,
+        ) &&
+        isEvidenceReferences(
+          hypothesis.contradicting_evidence,
+          evidenceCount,
+          true,
+        ),
+    ) &&
+    ["missing_information", "next_checks", "limitations"].every(
+      (key) =>
+        Array.isArray(value[key]) &&
+        value[key].every(
+          (item) => typeof item === "string" && item.trim().length > 0,
+        ),
+    )
+  );
+}
+
 function isInvestigationResult(
   value: unknown,
 ): value is InvestigationResult {
@@ -182,7 +274,8 @@ function isInvestigationResult(
     typeof value.model === "string" &&
     typeof value.response === "string" &&
     Array.isArray(value.evidence) &&
-    value.evidence.every(isEvidence)
+    value.evidence.every(isEvidence) &&
+    isInvestigationAnalysis(value.analysis, value.evidence.length)
   );
 }
 
@@ -334,11 +427,21 @@ function splitResponseSections(
   response: string,
 ): Array<{ title: string | null; content: string }> {
   const sectionPattern =
-    /^\s*(?:\d+[.)]\s*)?(Hechos respaldados por evidencia|Hipótesis pendientes de confirmar|Información faltante|Próximas comprobaciones recomendadas)\s*:?\s*$/iu;
+    /^\s*(?:\d+[.)]\s*)?(Hechos respaldados por evidencia|Hipótesis pendientes de confirmar|Información faltante|Próximas comprobaciones recomendadas|Limitaciones)\s*:?\s*$/iu;
   const sections: Array<{ title: string | null; content: string }> = [];
   let current: { title: string | null; content: string } | undefined;
 
   for (const line of response.split(/\r?\n/u)) {
+    const summary = /^\s*Resumen:\s*(.*)$/iu.exec(line);
+    if (summary) {
+      if (current) {
+        sections.push(current);
+      }
+
+      current = { title: "Resumen", content: summary[1] };
+      continue;
+    }
+
     const heading = sectionPattern.exec(line);
 
     if (heading) {

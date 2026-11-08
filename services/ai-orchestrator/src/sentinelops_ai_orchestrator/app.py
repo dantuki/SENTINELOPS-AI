@@ -1,5 +1,6 @@
 """FastAPI application for the SentinelOps AI orchestrator."""
 
+import json
 import logging
 import math
 import os
@@ -19,6 +20,102 @@ EMBEDDING_DIMENSIONS = 1024
 MAX_BATCH_SIZE = 32
 MAX_TEXT_CHARS = 20_000
 EMBEDDING_TIMEOUT_SECONDS = 30.0
+
+INVESTIGATION_ANALYSIS_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "summary_evidence_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {"type": "string", "pattern": "^E[1-9][0-9]*$"},
+        },
+        "observed_facts": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "evidence_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {"type": "string", "pattern": "^E[1-9][0-9]*$"},
+                    },
+                },
+                "required": ["claim", "evidence_refs"],
+                "additionalProperties": False,
+            },
+        },
+        "hypotheses": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "statement": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000,
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "supported_unconfirmed",
+                            "unverified",
+                            "contradicted",
+                            "insufficient_evidence",
+                        ],
+                    },
+                    "supporting_evidence": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {"type": "string", "pattern": "^E[1-9][0-9]*$"},
+                    },
+                    "contradicting_evidence": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {"type": "string", "pattern": "^E[1-9][0-9]*$"},
+                    },
+                },
+                "required": [
+                    "statement",
+                    "status",
+                    "supporting_evidence",
+                    "contradicting_evidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "missing_information": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+        "next_checks": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+        "limitations": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+    },
+    "required": [
+        "summary",
+        "summary_evidence_refs",
+        "observed_facts",
+        "hypotheses",
+        "missing_information",
+        "next_checks",
+        "limitations",
+    ],
+    "additionalProperties": False,
+}
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -482,6 +579,8 @@ class ChatRequest(BaseModel):
         max_length=MAX_TEXT_CHARS,
     )
     max_tokens: int = Field(default=1536, ge=1, le=1536)
+    response_format: Literal["text", "json"] = "text"
+    response_schema: dict[str, object] | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -491,6 +590,22 @@ class ChatRequest(BaseModel):
             raise ValueError("Prompt must not be empty.")
 
         return prompt
+
+    @field_validator("response_schema")
+    @classmethod
+    def validate_response_schema(
+        cls,
+        response_schema: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """Bound the JSON schema forwarded to the local model."""
+        if response_schema is not None:
+            try:
+                encoded = json.dumps(response_schema, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Response schema must be JSON serializable.") from exc
+            if len(encoded.encode("utf-8")) > 16_384:
+                raise ValueError("Response schema is too large.")
+        return response_schema
 
 
 class ChatResponse(BaseModel):
@@ -513,7 +628,7 @@ class LocalModelResponseError(Exception):
 
 
 LocalChatGenerator = Callable[
-    [str, int],
+    [str, int, Literal["text", "json"], dict[str, object] | None],
     Awaitable[tuple[str, str]],
 ]
 
@@ -521,6 +636,8 @@ LocalChatGenerator = Callable[
 async def generate_local_chat(
     prompt: str,
     max_tokens: int = 1536,
+    response_format: Literal["text", "json"] = "text",
+    response_schema: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     """Generate a response using the local Ollama chat API."""
 
@@ -563,20 +680,24 @@ async def generate_local_chat(
         },
     ]
 
+    ollama_request: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": 0.1,
+        },
+    }
+    if response_format == "json":
+        ollama_request["format"] = response_schema or "json"
+
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
                 f"{base_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": False,
-                    "options": {
-                        "num_predict": max_tokens,
-                        "temperature": 0.1,
-                    },
-                },
+                json=ollama_request,
             )
 
             response.raise_for_status()
@@ -701,6 +822,8 @@ async def warm_up_models(
         await chat_generator(
             "Responde solo con la palabra listo.",
             8,
+            "text",
+            None,
         )
     except LocalModelUnavailable:
         raise HTTPException(
@@ -753,11 +876,18 @@ async def create_chat_response(
     generator: LocalChatGenerator = Depends(get_local_chat_generator),
 ) -> ChatResponse:
     """Generate a response without exposing internal thinking output."""
+    if payload.response_schema is not None and payload.response_format != "json":
+        raise HTTPException(
+            status_code=422,
+            detail="A response schema requires JSON response format.",
+        )
 
     try:
         model, generated_text = await generator(
             payload.prompt,
             payload.max_tokens,
+            payload.response_format,
+            payload.response_schema,
         )
 
     except LocalModelUnavailable:

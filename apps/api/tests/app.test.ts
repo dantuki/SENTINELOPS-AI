@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { Writable } from "node:stream";
 import { after, test } from "node:test";
 import type { FastifyInstance } from "fastify";
-import { registerInvestigationRoutes } from "../src/investigation-routes.js";
+import {
+  analysisSchema,
+  diagnoseInvestigationResponse,
+  registerInvestigationRoutes,
+} from "../src/investigation-routes.js";
 import { buildApp } from "../src/app.js";
 import type {
   ChunkEmbeddingInput,
@@ -34,6 +40,233 @@ import { registerSourceRoutes } from "../src/source-routes.js";
 import { createTestSecurity } from "./security-test-fixture.js";
 
 const apps: FastifyInstance[] = [];
+const sharedInvestigationSchema: unknown = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../packages/shared-contracts/schemas/investigation-analysis.schema.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+
+test("Product API investigation schema matches the shared contract", () => {
+  assert.deepEqual(analysisSchema, sharedInvestigationSchema);
+});
+
+function diagnoseAnalysis(
+  analysis: unknown,
+  evidenceCount = 1,
+): Array<{ path: string; code: string }> {
+  return diagnoseInvestigationResponse(
+    {
+      model: "test-model",
+      response:
+        typeof analysis === "string" ? analysis : JSON.stringify(analysis),
+    },
+    evidenceCount,
+  );
+}
+
+test("investigation contract diagnostics accept a valid structured response", () => {
+  assert.deepEqual(
+    diagnoseAnalysis(JSON.parse(structuredInvestigationResponse())),
+    [],
+  );
+});
+
+test("investigation contract diagnostics identify invalid JSON without echoing content", () => {
+  assert.deepEqual(diagnoseAnalysis("{private prompt and malformed JSON"), [
+    { path: "$.response", code: "invalid_json" },
+  ]);
+});
+
+test("investigation contract diagnostics identify invalid orchestrator envelopes", () => {
+  assert.deepEqual(
+    diagnoseInvestigationResponse({ response: {} }, 1),
+    [
+      { path: "$.model", code: "required_field_missing" },
+      { path: "$.response", code: "expected_string" },
+    ],
+  );
+});
+
+test("investigation contract diagnostics identify missing and unexpected fields", () => {
+  const analysis = JSON.parse(structuredInvestigationResponse()) as Record<
+    string,
+    unknown
+  >;
+  delete analysis.summary;
+  analysis.internalPrompt = "must not appear in diagnostics";
+  analysis["unsafe\nfield"] = "must not appear in diagnostics";
+
+  const diagnostics = diagnoseAnalysis(analysis);
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.summary" && code === "required_field_missing",
+    ),
+  );
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.<unknown>" && code === "unexpected_field",
+    ),
+  );
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.<unknown>" && code === "unexpected_field",
+    ),
+  );
+  assert.equal(JSON.stringify(diagnostics).includes("must not appear"), false);
+});
+
+test("investigation validation logs do not include attacker-controlled unknown keys", async () => {
+  const logChunks: string[] = [];
+  const logStream = new Writable({
+    write(chunk, _encoding, callback) {
+      logChunks.push(chunk.toString());
+      callback();
+    },
+  });
+  const app = createTestApp({
+    logger: { level: "warn", stream: logStream },
+  });
+  const unknownKey = "attacker-key\r\nforged-log-entry";
+  const unknownValue = "private-unknown-value";
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      const analysis = JSON.parse(
+        structuredInvestigationResponse(),
+      ) as Record<string, unknown>;
+      analysis[unknownKey] = unknownValue;
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: JSON.stringify(analysis),
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: { question: "Investiga este incidente." },
+  });
+  const actualLogs = logChunks.join("");
+
+  assert.equal(response.statusCode, 502);
+  assert.ok(actualLogs.includes("unexpected_field"));
+  assert.ok(actualLogs.includes("$.response.<unknown>"));
+  assert.equal(actualLogs.includes(unknownKey), false);
+  assert.equal(actualLogs.includes(unknownValue), false);
+});
+
+test("investigation contract diagnostics identify wrong types and out-of-range values", () => {
+  const analysis = JSON.parse(structuredInvestigationResponse()) as Record<
+    string,
+    unknown
+  >;
+  analysis.summary = 42;
+  analysis.hypotheses = "not-an-array";
+
+  const diagnostics = diagnoseAnalysis(analysis);
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.summary" && code === "expected_string",
+    ),
+  );
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.hypotheses" && code === "expected_array",
+    ),
+  );
+});
+
+test("investigation contract diagnostics distinguish malformed and unknown citations", () => {
+  const malformed = JSON.parse(structuredInvestigationResponse()) as Record<
+    string,
+    unknown
+  >;
+  malformed.summary_evidence_refs = ["citation-1"];
+  const malformedDiagnostics = diagnoseAnalysis(malformed);
+  assert.ok(
+    malformedDiagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.summary_evidence_refs[0]" &&
+        code === "malformed_citation",
+    ),
+  );
+
+  const unknown = JSON.parse(structuredInvestigationResponse()) as Record<
+    string,
+    unknown
+  >;
+  unknown.summary_evidence_refs = ["E2"];
+  const unknownDiagnostics = diagnoseAnalysis(unknown);
+  assert.ok(
+    unknownDiagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.summary_evidence_refs[0]" &&
+        code === "evidence_reference_not_found",
+    ),
+  );
+});
+
+test("investigation contract diagnostics identify unsupported IDs and semantic errors", () => {
+  const analysis = JSON.parse(
+    structuredInvestigationResponse(["E1"], "Resumen.", [
+      {
+        statement: "Hipótesis sin apoyo.",
+        status: "confirmed_root_cause",
+        supporting_evidence: [],
+        contradicting_evidence: [],
+      },
+    ]),
+  ) as Record<string, unknown>;
+  const diagnostics = diagnoseAnalysis(analysis);
+  assert.ok(
+    diagnostics.some(
+      ({ path, code }) =>
+        path === "$.response.hypotheses[0].status" &&
+        code === "identifier_not_recognized",
+    ),
+  );
+});
+
+function structuredInvestigationResponse(
+  summaryEvidenceRefs: string[] = ["E1"],
+  summary = "El fragmento registra una observación.",
+  hypotheses: Array<{
+    statement: string;
+    status: string;
+    supporting_evidence: string[];
+    contradicting_evidence: string[];
+  }> = [],
+): string {
+  return JSON.stringify({
+    summary,
+    summary_evidence_refs: summaryEvidenceRefs,
+    observed_facts: [
+      {
+        claim: "El fragmento registra una observación.",
+        evidence_refs: ["E1"],
+      },
+    ],
+    hypotheses,
+    missing_information: [],
+    next_checks: [],
+    limitations: [],
+  });
+}
 
 function createTestApp(
   options: Parameters<typeof buildApp>[0] = {},
@@ -1688,14 +1921,27 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
       const body = JSON.parse(String(init?.body)) as {
         prompt: string;
         max_tokens: number;
+        response_format: string;
+        response_schema: { required: string[]; additionalProperties: boolean };
       };
 
       requestedPrompt = body.prompt;
       assert.equal(body.max_tokens, 1536);
+      assert.equal(body.response_format, "json");
+      assert.deepEqual(body.response_schema.required, [
+        "summary",
+        "summary_evidence_refs",
+        "observed_facts",
+        "hypotheses",
+        "missing_information",
+        "next_checks",
+        "limitations",
+      ]);
+      assert.equal(body.response_schema.additionalProperties, false);
 
       return Response.json({
         model: "qwen3.5:4b",
-        response: "El fragmento [E1] contiene la evidencia recuperada.",
+        response: structuredInvestigationResponse(),
       });
     },
   });
@@ -1718,19 +1964,205 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
 
   assert.ok(requestedPrompt.includes(chunkTestRecord.content));
   assert.ok(requestedPrompt.includes(chunkTestRecord.id));
-  assert.ok(requestedPrompt.includes("[E1]"));
+  assert.ok(requestedPrompt.includes('"citation": "E1"'));
 
   const payload = response.json();
 
   assert.equal(payload.data.model, "qwen3.5:4b");
   assert.equal(
-    payload.data.response,
-    "El fragmento [E1] contiene la evidencia recuperada.",
+    payload.data.analysis.summary,
+    "El fragmento registra una observación.",
   );
+  assert.ok(payload.data.response.includes("[E1]"));
 
   assert.equal(payload.data.evidence.length, 1);
   assert.equal(payload.data.evidence[0].id, chunkTestRecord.id);
   assert.equal(payload.data.evidence[0].similarity, 0.91);
+});
+
+test("POST project investigate rejects model citations outside retrieved evidence", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: structuredInvestigationResponse(["E2"]),
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "AI model response did not satisfy the structured contract",
+  });
+});
+
+test("POST project investigate rejects malformed structured model JSON", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: "{invalid-json",
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "AI model response did not satisfy the structured contract",
+  });
+});
+
+test("POST project investigate returns a sanitized error for malformed orchestrator JSON", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) =>
+      String(input).endsWith("/embeddings")
+        ? Response.json(fakeEmbeddingPayload(1))
+        : new Response("private prompt and malformed body", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: { question: "Investiga este incidente." },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), { error: "Invalid AI model response" });
+  assert.equal(response.body.includes("private prompt"), false);
+});
+
+test("POST project investigate maps orchestrator HTTP 500 to a sanitized 503", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) =>
+      String(input).endsWith("/embeddings")
+        ? Response.json(fakeEmbeddingPayload(1))
+        : new Response("private traceback", { status: 500 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: { question: "Investiga este incidente." },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), { error: "AI service unavailable" });
+  assert.equal(response.body.includes("private traceback"), false);
+});
+
+test("POST project investigate rejects unsupported hypothesis states", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: structuredInvestigationResponse(
+          ["E1"],
+          undefined,
+          [
+            {
+              statement: "La causa está confirmada.",
+              status: "confirmed_root_cause",
+              supporting_evidence: ["E1"],
+              contradicting_evidence: [],
+            },
+          ],
+        ),
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "AI model response did not satisfy the structured contract",
+  });
+});
+
+test("POST project investigate rejects deterministic factuality violations", async () => {
+  const app = createTestApp();
+
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+
+      return Response.json({
+        model: "qwen3.5:4b",
+        response: structuredInvestigationResponse(
+          ["E1"],
+          "20 conexiones activas están disponibles.",
+        ),
+      });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: {
+      question: "¿Qué información existe sobre este incidente?",
+    },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), {
+    error: "AI response failed deterministic factuality validation",
+  });
 });
 
 test("POST project investigate returns 404 when project does not exist", async () => {
@@ -1862,7 +2294,7 @@ test("POST project investigate returns empty evidence when no fragments match", 
 
   assert.ok(
     payload.data.response.includes(
-      "No se encontró evidencia suficientemente relevante",
+      "La recuperación no produjo evidencia",
     ),
   );
 
@@ -1931,7 +2363,7 @@ test("POST project investigate filters low-similarity matches without invoking c
 
   assert.ok(
     payload.data.response.includes(
-      "No se encontró evidencia suficientemente relevante",
+      "La recuperación no produjo evidencia",
     ),
   );
 
@@ -1966,7 +2398,7 @@ test("incident investigation retains measured relevant evidence above its calibr
 
         return Response.json({
           model: "qwen3.5:4b",
-          response: "La evidencia recuperada respalda esta respuesta [E1].",
+          response: structuredInvestigationResponse(),
         });
       },
     },

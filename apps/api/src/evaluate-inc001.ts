@@ -2,9 +2,11 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import {
+  containsEvaluationReference,
   evaluateInc001Response,
+  isInc001EvaluationAccepted,
+  parseInc001GroundTruth,
   type Inc001Evidence,
-  type Inc001GroundTruth,
 } from "./inc001-evaluation.js";
 
 interface InvestigationData {
@@ -13,16 +15,22 @@ interface InvestigationData {
   evidence: Inc001Evidence[];
 }
 
-interface GroundTruthReference extends Inc001GroundTruth {
-  dataset: string;
-  incident_id: string;
-}
-
 interface EvaluationSession {
   cookie: string;
   csrfToken: string;
   origin: string;
 }
+
+type EvaluationStage =
+  | "arguments"
+  | "warmup"
+  | "readiness"
+  | "authentication"
+  | "ingestion"
+  | "investigation"
+  | "evaluation";
+
+let currentStage: EvaluationStage = "arguments";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -30,44 +38,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     value !== null &&
     !Array.isArray(value)
   );
-}
-
-function parseGroundTruth(value: unknown): GroundTruthReference {
-  if (
-    !isRecord(value) ||
-    typeof value.dataset !== "string" ||
-    value.incident_id !== "INC-001" ||
-    !Array.isArray(value.expected_observations) ||
-    !Array.isArray(value.must_not_claim)
-  ) {
-    throw new Error("INC-001 evaluation reference has an invalid shape.");
-  }
-
-  const expectedObservations: Array<{ id: string }> = [];
-  const mustNotClaim: string[] = [];
-
-  for (const observation of value.expected_observations) {
-    if (!isRecord(observation) || typeof observation.id !== "string") {
-      throw new Error("INC-001 observation reference has an invalid shape.");
-    }
-
-    expectedObservations.push({ id: observation.id });
-  }
-
-  for (const claim of value.must_not_claim) {
-    if (typeof claim !== "string") {
-      throw new Error("INC-001 prohibited claim reference is invalid.");
-    }
-
-    mustNotClaim.push(claim);
-  }
-
-  return {
-    dataset: value.dataset,
-    incident_id: "INC-001",
-    expected_observations: expectedObservations,
-    must_not_claim: mustNotClaim,
-  };
 }
 
 function parseInvestigation(value: unknown): InvestigationData {
@@ -221,6 +191,7 @@ async function withEvaluationSession(
 }
 
 async function main(): Promise<void> {
+  currentStage = "arguments";
   const argumentsList = process.argv.slice(2);
   const skipIngestion = argumentsList.includes("--skip-ingestion");
   const positionalArguments = argumentsList.filter(
@@ -256,6 +227,7 @@ async function main(): Promise<void> {
   }
 
   const warmupStartedAt = performance.now();
+  currentStage = "warmup";
   const aiAuthKey = process.env.AI_ORCHESTRATOR_API_KEY;
   const warmupResponse = await fetch(new URL("/warmup", aiBase), {
     method: "POST",
@@ -270,6 +242,7 @@ async function main(): Promise<void> {
   const warmupDurationMs =
     Math.round((performance.now() - warmupStartedAt) * 10) / 10;
 
+  currentStage = "readiness";
   const readinessResponse = await fetch(new URL("/ready", aiBase), {
     signal: AbortSignal.timeout(3_000),
   });
@@ -279,6 +252,7 @@ async function main(): Promise<void> {
     );
   }
 
+  currentStage = "authentication";
   const session = await authenticateForEvaluation(apiBase);
   await withEvaluationSession(apiBase, session, () =>
     runEvaluation(
@@ -287,6 +261,9 @@ async function main(): Promise<void> {
       projectId,
       skipIngestion,
       warmupDurationMs,
+      (stage) => {
+        currentStage = stage;
+      },
     ),
   );
 }
@@ -297,9 +274,11 @@ async function runEvaluation(
   projectId: string,
   skipIngestion: boolean,
   warmupDurationMs: number,
+  setStage: (stage: EvaluationStage) => void,
 ): Promise<void> {
   let ingestionDurationMs: number | null = null;
   if (!skipIngestion) {
+    setStage("ingestion");
     const ingestionStartedAt = performance.now();
     const ingestion = await postJson(
       new URL(`/api/projects/${projectId}/ingestions/demo`, apiBase),
@@ -324,6 +303,7 @@ async function runEvaluation(
       Math.round((performance.now() - ingestionStartedAt) * 10) / 10;
   }
 
+  setStage("investigation");
   const investigationStartedAt = performance.now();
   const investigation = parseInvestigation(
     await postJson(
@@ -340,6 +320,7 @@ async function runEvaluation(
   const investigationDurationMs =
     Math.round((performance.now() - investigationStartedAt) * 10) / 10;
 
+  setStage("evaluation");
   const referencePath = fileURLToPath(
     new URL(
       "../../../datasets/demo-pedidos-api/ground-truth/INC-001.expected.json",
@@ -349,30 +330,21 @@ async function runEvaluation(
   const rawGroundTruth: unknown = JSON.parse(
     await readFile(referencePath, "utf8"),
   );
-  const groundTruth = parseGroundTruth(rawGroundTruth);
+  const groundTruth = parseInc001GroundTruth(rawGroundTruth);
   const evaluation = evaluateInc001Response(
     investigation.response,
     investigation.evidence,
     groundTruth,
   );
-  const referenceLeaked = investigation.evidence.some((item) =>
-    [
-      "synthetic_evaluation_reference",
-      "evaluation_only_do_not_ingest",
-      "best_supported_hypothesis",
-    ].some((marker) => item.content.includes(marker)),
-  );
+  const referenceLeaked = containsEvaluationReference(investigation.evidence);
   const abstained =
     investigation.model === "not-invoked" ||
     investigation.evidence.length === 0;
-  const passed =
-    !abstained &&
-    !referenceLeaked &&
-    evaluation.retrievalRecall === 1 &&
-    evaluation.answerCoverage === 1 &&
-    evaluation.citations.count > 0 &&
-    evaluation.citations.invalid.length === 0 &&
-    evaluation.factualityViolations.length === 0;
+  const passed = isInc001EvaluationAccepted(
+    investigation.model,
+    investigation.evidence,
+    evaluation,
+  );
 
   console.log(
     JSON.stringify(
@@ -381,6 +353,7 @@ async function runEvaluation(
         incidentId: groundTruth.incident_id,
         model: investigation.model,
         evidenceCount: investigation.evidence.length,
+        evidence: investigation.evidence,
         response: investigation.response,
         ingestion: skipIngestion ? "skipped" : "completed",
         timings: {
@@ -405,7 +378,7 @@ async function runEvaluation(
 
 void main().catch((error: unknown) => {
   console.error(
-    "INC-001 evaluation failed:",
+    `INC-001 evaluation failed [stage=${currentStage}]:`,
     error instanceof Error ? error.message : "Unknown evaluation error.",
   );
   process.exitCode = 1;

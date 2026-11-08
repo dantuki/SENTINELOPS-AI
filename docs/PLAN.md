@@ -23,6 +23,14 @@ La prueba de aislamiento pasó en una base PostgreSQL separada con datos sintét
 
 **Phase 4 no ha comenzado.** No iniciar Evaluation Engine, Observability Engine ni dashboards hasta que Phase 3.1 supere la puerta de aceptación con pruebas reproducibles. La matriz de estado detallada y los comandos ejecutados están en `docs/TEST-PLAN.md`.
 
+### Estado de implementación — Reliability Gate
+
+Se incorporó en el código un contrato JSON para la investigación, con hechos, hipótesis tipadas, información faltante, comprobaciones y limitaciones. La API valida el esquema y que las referencias correspondan a evidencia recuperada, aplica reglas deterministas de factualidad y se abstiene cuando no hay evidencia suficiente; el orquestador envía a Ollama el esquema estructurado proporcionado por la API, que sigue siendo responsable de la validación final. Los diagnósticos internos de contrato contienen rutas y códigos acotados, no el texto generado, y la respuesta pública conserva un error genérico.
+
+En una validación anterior pasaron 115 pruebas de Product API, 33 pruebas del AI Orchestrator y los typechecks de API y runner. El runner PostgreSQL también terminó correctamente en esa validación (migraciones 001–007 idempotentes, 2 pruebas aprobadas, 0 fallidas) dentro de un contenedor temporal eliminado al terminar. El runner recibió después cambios de ciclo de vida; desde esos cambios solo se han ejecutado pruebas unitarias y typechecks, no el runner PostgreSQL real. El runner de INC-001 registra la etapa de fallo y solo declara verificado el cleanup al confirmar el estado de procesos y recursos temporales. La evaluación real de INC-001 no se ejecutó; por tanto, el gate sigue bloqueado y no se declara aprobado.
+
+La validación correctiva local pasó 130 pruebas de Product API, 34 pruebas de Orchestrator y los typechecks de API y web; también pasó el typecheck explícito de los runners y sus helpers. El runner INC-001 recalcula las métricas declaradas desde la respuesta y las evidencias capturadas antes de aceptar un reporte. Los runners conservan la primera señal, revisan interrupciones durante etapas de arranque y notifican recursos temporales persistentes sin afirmar una limpieza no verificada. Estas comprobaciones son unitarias y simuladas: no se ejecutaron Docker, PostgreSQL, migraciones, runners reales, Ollama ni la evaluación RAG. La integración del runner PostgreSQL, la limpieza sobre procesos/recursos reales y la evaluación INC-001 siguen pendientes.
+
 ## 2. Estado inicial verificado
 
 Durante la inspección inicial se observó lo siguiente:

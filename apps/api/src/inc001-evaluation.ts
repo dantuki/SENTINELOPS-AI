@@ -8,6 +8,11 @@ export interface Inc001GroundTruth {
   must_not_claim: string[];
 }
 
+export interface Inc001EvaluationReference extends Inc001GroundTruth {
+  dataset: string;
+  incident_id: "INC-001";
+}
+
 export interface FactualityViolation {
   id: string;
   description: string;
@@ -23,6 +28,71 @@ export interface Inc001Evaluation {
     invalid: string[];
   };
   factualityViolations: FactualityViolation[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parseInc001GroundTruth(
+  value: unknown,
+): Inc001EvaluationReference {
+  if (
+    !isRecord(value) ||
+    typeof value.dataset !== "string" ||
+    value.incident_id !== "INC-001" ||
+    !Array.isArray(value.expected_observations) ||
+    !Array.isArray(value.must_not_claim)
+  ) {
+    throw new Error("INC-001 evaluation reference has an invalid shape.");
+  }
+
+  const expectedObservations: Array<{ id: string }> = [];
+  for (const observation of value.expected_observations) {
+    if (
+      !isRecord(observation) ||
+      typeof observation.id !== "string" ||
+      observation.id.length === 0
+    ) {
+      throw new Error("INC-001 observation reference has an invalid shape.");
+    }
+    expectedObservations.push({ id: observation.id });
+  }
+
+  if (
+    new Set(expectedObservations.map(({ id }) => id)).size !==
+    expectedObservations.length
+  ) {
+    throw new Error("INC-001 observation references must be unique.");
+  }
+
+  const mustNotClaim: string[] = [];
+  for (const claim of value.must_not_claim) {
+    if (typeof claim !== "string") {
+      throw new Error("INC-001 prohibited claim reference is invalid.");
+    }
+    mustNotClaim.push(claim);
+  }
+
+  return {
+    dataset: value.dataset,
+    incident_id: "INC-001",
+    expected_observations: expectedObservations,
+    must_not_claim: mustNotClaim,
+  };
+}
+
+export function containsEvaluationReference(
+  evidence: Inc001Evidence[],
+): boolean {
+  const markers = [
+    "synthetic_evaluation_reference",
+    "evaluation_only_do_not_ingest",
+    "best_supported_hypothesis",
+  ];
+  return evidence.some((item) =>
+    markers.some((marker) => item.content.includes(marker)),
+  );
 }
 
 const observationPatterns: Record<string, RegExp> = {
@@ -144,6 +214,14 @@ function matchesUnnegatedClaim(text: string, pattern: RegExp): boolean {
   );
 }
 
+export function detectFactualityViolations(
+  text: string,
+): FactualityViolation[] {
+  return factualityRules
+    .filter((rule) => matchesUnnegatedClaim(text, rule.pattern))
+    .map(({ id, description }) => ({ id, description }));
+}
+
 export function evaluateInc001Response(
   response: string,
   evidence: Inc001Evidence[],
@@ -189,8 +267,23 @@ export function evaluateInc001Response(
       count: citations.length,
       invalid,
     },
-    factualityViolations: factualityRules
-      .filter((rule) => matchesUnnegatedClaim(response, rule.pattern))
-      .map(({ id, description }) => ({ id, description })),
+    factualityViolations: detectFactualityViolations(response),
   };
+}
+
+export function isInc001EvaluationAccepted(
+  model: string,
+  evidence: Inc001Evidence[],
+  evaluation: Inc001Evaluation,
+): boolean {
+  return (
+    model !== "not-invoked" &&
+    evidence.length > 0 &&
+    !containsEvaluationReference(evidence) &&
+    evaluation.retrievalRecall === 1 &&
+    evaluation.answerCoverage === 1 &&
+    evaluation.citations.count > 0 &&
+    evaluation.citations.invalid.length === 0 &&
+    evaluation.factualityViolations.length === 0
+  );
 }

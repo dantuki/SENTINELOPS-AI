@@ -74,10 +74,18 @@ Las concesiones y revocaciones de membresía invalidan las sesiones del usuario 
 
 Los eventos de autenticación, cambios administrativos y denegaciones se registran sin contraseñas ni tokens. La dirección IP se guarda como hash. Las operaciones de bootstrap, adopción y recuperación requieren acceso local a la base y a una terminal; no existe un flujo remoto de recuperación.
 
+Los fallos de validación de la respuesta estructurada del modelo registran únicamente códigos y rutas de campos sanitizadas, no el contenido generado. El cliente recibe un error genérico y no los detalles internos del diagnóstico.
+
 La autorización del navegador no es la frontera de seguridad: la API valida cada ruta y el acceso a proyectos se comprueba en el backend. Las llamadas de inferencia del API al orquestador pueden usar autenticación de servicio; los endpoints `/health` y `/ready` siguen públicos. No expongas directamente el orquestador a redes no confiables.
 
 ## Verificación y límites
 
 Las pruebas unitarias de seguridad cubren denegación por defecto, sesión requerida, validación de Origin/CSRF, ocultación de recursos y configuración de cookies. La autorización SQL y el aislamiento entre usuarios requieren pruebas de integración contra una base PostgreSQL aislada con la migración aplicada.
+
+Se añadió `npm.cmd --prefix apps\api run test:postgres` para iniciar un contenedor PostgreSQL temporal con base exclusiva y puerto dinámico en loopback, aplicar y comprobar las migraciones 001–007, repetirlas para verificar idempotencia y ejecutar secuencialmente `project-isolation.integration.test.ts` y `security.integration.test.ts` (`--test-concurrency=1`). El contenedor recibe un volumen anónimo desechable de la imagen; no monta ni reutiliza el volumen habitual y no carga `.env`. En una ejecución anterior, el runner terminó con exit 0: migraciones 001–007 aplicadas, segunda ejecución idempotente y 2 pruebas aprobadas, 0 fallidas. El contenedor `sentinelops-ai-postgres-1` y el volumen `sentinelops-ai_postgres_data` no se modificaron en esa ejecución. El ciclo de vida del runner se endureció después; la nueva versión solo cuenta con pruebas unitarias y typecheck y queda pendiente de ejecución real. La evaluación RAG de INC-001 y el cierre del Reliability Gate también siguen pendientes.
+
+La validación correctiva posterior pasó 130 pruebas de Product API, 34 de Orchestrator y los typechecks de API, web y runners. El runner de PostgreSQL aplica límites a sus procesos auxiliares, preserva la primera señal y solo declara los recursos como eliminados cuando `inspect` confirma su ausencia; si un volumen anónimo continúa presente, registra su nombre y mount y no repite la eliminación manual. Estas rutas se probaron con dobles simulados, no contra Docker.
+
+El runner de INC-001 ahora vuelve a calcular las métricas desde el texto de respuesta y la evidencia incluida en el reporte. Una discrepancia entre observaciones, citas, factualidad, abstención o filtración invalida el resultado. La evidencia capturada corresponde al dataset sintético INC-001; las reglas son deterministas y no reemplazan una revisión semántica ni verifican por sí solas la procedencia del dato. No se ejecutaron Docker, PostgreSQL, migraciones, `test:postgres`, el runner aislado, Ollama ni la evaluación RAG en esta validación; el Reliability Gate permanece pendiente de verificación integrada.
 
 La incorporación de esta fase no valida por sí sola el despliegue, las copias de seguridad, la seguridad de infraestructura, la recuperación ante desastres ni la resistencia completa a ataques. No se debe declarar producción lista hasta completar esas verificaciones y revisar el modelo de amenazas.

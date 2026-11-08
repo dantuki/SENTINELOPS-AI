@@ -156,7 +156,7 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 | Estructura del monorepo | Presente |
 | Interfaz Next.js | Incluye el espacio de investigación y la Knowledge Base; el flujo E2E sigue pendiente de validar |
 | API Fastify | Incluye API de producto, ingestión documental, embeddings, búsqueda e investigación |
-| PostgreSQL | Integración local verificada; el runner registra y aplica migraciones de forma transaccional |
+| PostgreSQL | Integración local verificada en una ejecución anterior; los cambios recientes al ciclo de vida del runner esperan una nueva integración |
 | pgvector | PostgreSQL 18.6 y pgvector 0.8.7 verificados en la ejecución local del 3 de noviembre de 2026 |
 | Fuentes, documentos y fragmentos | Ingesta real de INC-001, embeddings persistidos y repetición idempotente comprobadas localmente |
 | Embeddings locales | El orquestador usa Ollama con `qwen3-embedding:0.6b` y vectores de 1024 dimensiones |
@@ -165,7 +165,9 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 | Importación de INC-001 | Los dos archivos allowlisted se indexaron; reintentar no creó chunks ni embeddings duplicados |
 | Investigación E2E con persistencia real | La búsqueda recupera evidencia, pero la última evaluación factual no alcanzó la cobertura requerida |
 | Readiness del orquestador | `/health` es liveness; `/ready` comprueba que los dos modelos requeridos estén cargados |
-| Fundamentos de autenticación | Fase Security Foundation implementada en código; verificación de aislamiento PostgreSQL y despliegue pendiente |
+| Fundamentos de autenticación | Fase Security Foundation implementada en código; integración de aislamiento aprobada anteriormente; despliegue pendiente |
+| Contrato de investigación | API y orquestador se comprueban contra un JSON Schema compartido; la API valida citas y factualidad, y la UI mantiene una validación de presentación |
+| Integración de seguridad PostgreSQL | En una ejecución anterior, el runner desechable y sus suites terminaron correctamente (2 pruebas aprobadas, 0 fallidas); tras el hardening actual del ciclo de vida, el runner real aún debe repetirse |
 | Evaluación factual determinista | Incluye nueve reglas de factualidad para INC-001; no sustituye un benchmark completo |
 | Clasificador de incidentes entrenado | Planeado |
 | Servidor MCP independiente | Implementación y pruebas de protocolo pendientes de verificación |
@@ -186,6 +188,12 @@ El repositorio ya cuenta con una base sobre la que continuar el desarrollo.
 - La aceptación continúa bloqueada por la cobertura insuficiente y la afirmación causal no respaldada; Phase 4 no ha comenzado.
 
 No se declara aprobada la fase ni se inicia Phase 4 hasta cerrar estos puntos con pruebas reproducibles. Los umbrales de similitud por incidente son experimentales y no representan confianza causal.
+
+El runner aislado ahora conserva en su reporte las evidencias recuperadas y el contenido de respuesta que sustentan las métricas. Antes de aceptar el resultado, vuelve a calcular recuperación, cobertura, citas, factualidad y filtración de referencia desde esos datos; discrepancias invalidan el reporte y no pueden producir un `PASS`. Esta verificación es determinista y depende de las reglas de evaluación de INC-001, no constituye una prueba semántica general.
+
+Los runners registran señales repetidas conservando la primera interrupción, comprueban puntos de cancelación durante el arranque y esperan a completar la limpieza. El runner PostgreSQL limita el tiempo de cada proceso auxiliar; si un contenedor o volumen anónimo persiste, informa su estado e identidad y no intenta una segunda eliminación manual del volumen.
+
+En la validación correctiva local pasaron 130 pruebas de Product API, 34 del AI Orchestrator y los typechecks de API, web y runners. Las pruebas nuevas cubren reportes con métricas fabricadas, respuestas sin observaciones, evidencias no relacionadas, filtración de ground truth, interrupciones simuladas, parada concurrente de procesos y recursos Docker persistentes simulados. No se ejecutaron Docker, PostgreSQL, migraciones, runners reales, Ollama ni la evaluación RAG; la limpieza integrada y la calidad de la respuesta real de INC-001 siguen pendientes.
 
 Los resultados de pruebas con mocks y las mediciones de una ejecución local no garantizan la disponibilidad ni el rendimiento de otros entornos.
 

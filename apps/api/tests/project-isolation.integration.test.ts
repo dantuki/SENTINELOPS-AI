@@ -306,6 +306,196 @@ test("semantic search isolates projects and incident filters in PostgreSQL", asy
       },
     ]);
 
+    const createEvidenceTrail = async (
+      projectId: string,
+      reference: string,
+    ): Promise<void> => {
+      const incident = await pool.query<IdRow>(
+        `
+          INSERT INTO incidents (project_id, external_reference, title)
+          VALUES ($1::uuid, $2, $3)
+          RETURNING id, title AS name
+        `,
+        [projectId, reference, `${syntheticMarker} ${reference}`],
+      );
+      const incidentId = incident.rows[0]?.id;
+      assert.ok(incidentId);
+      const investigation = await pool.query<IdRow>(
+        `
+          INSERT INTO investigations (project_id, incident_id)
+          VALUES ($1::uuid, $2::uuid)
+          RETURNING id
+        `,
+        [projectId, incidentId],
+      );
+      const investigationId = investigation.rows[0]?.id;
+      assert.ok(investigationId);
+      const chunk = await pool.query<{
+        id: string;
+        documentId: string;
+      }>(
+        `
+          SELECT id, document_id AS "documentId"
+          FROM document_chunks
+          WHERE project_id = $1::uuid
+          ORDER BY ordinal
+          LIMIT 1
+        `,
+        [projectId],
+      );
+      assert.ok(chunk.rows[0]);
+      await pool.query(
+        `
+          INSERT INTO evidence_records (
+            project_id, investigation_id, evidence_type, document_id,
+            chunk_id, title, excerpt
+          )
+          VALUES ($1::uuid, $2::uuid, 'document_chunk', $3::uuid,
+                  $4::uuid, $5, $6)
+        `,
+        [
+          projectId,
+          investigationId,
+          chunk.rows[0].documentId,
+          chunk.rows[0].id,
+          `${syntheticMarker} ${reference} evidence`,
+          `${syntheticMarker} ${reference} excerpt`,
+        ],
+      );
+      return;
+    };
+
+    await createEvidenceTrail(projectA, `${firstIncident}-PROJECT-A`);
+    await createEvidenceTrail(projectB, `${firstIncident}-PROJECT-B`);
+
+    const projectBReferences = await pool.query<{
+      incidentId: string;
+      investigationId: string;
+      documentId: string;
+    }>(
+      `
+        SELECT
+          incidents.id AS "incidentId",
+          investigations.id AS "investigationId",
+          documents.id AS "documentId"
+        FROM incidents
+        JOIN investigations
+          ON investigations.project_id = incidents.project_id
+         AND investigations.incident_id = incidents.id
+        JOIN documents ON documents.project_id = incidents.project_id
+        WHERE incidents.project_id = $1::uuid
+          AND incidents.external_reference = $2
+        LIMIT 1
+      `,
+      [projectB, `${firstIncident}-PROJECT-B`],
+    );
+    assert.ok(projectBReferences.rows[0]);
+    const projectBReference = projectBReferences.rows[0];
+
+    await assert.rejects(
+      pool.query(
+        `
+          INSERT INTO investigations (project_id, incident_id)
+          VALUES ($1::uuid, $2::uuid)
+        `,
+        [projectA, projectBReference.incidentId],
+      ),
+      {
+        code: "23503",
+        constraint: "fk_investigations_incident_project",
+      },
+    );
+    await assert.rejects(
+      pool.query(
+        `
+          INSERT INTO document_chunks (
+            project_id, document_id, ordinal, content
+          )
+          VALUES ($1::uuid, $2::uuid, 100, $3)
+        `,
+        [
+          projectA,
+          projectBReference.documentId,
+          `${syntheticMarker} cross-project chunk must fail`,
+        ],
+      ),
+      {
+        code: "23503",
+        constraint: "fk_document_chunks_document_project",
+      },
+    );
+    await assert.rejects(
+      pool.query(
+        `
+          INSERT INTO evidence_records (
+            project_id, investigation_id, evidence_type, title, excerpt
+          )
+          VALUES ($1::uuid, $2::uuid, 'manual_note', $3, $4)
+        `,
+        [
+          projectA,
+          projectBReference.investigationId,
+          `${syntheticMarker} cross-project evidence must fail`,
+          syntheticMarker,
+        ],
+      ),
+      {
+        code: "23503",
+        constraint: "fk_evidence_investigation_project",
+      },
+    );
+
+    for (const projectId of [projectA, projectB]) {
+      const incidentRows = await pool.query<{ projectId: string }>(
+        "SELECT project_id AS \"projectId\" FROM incidents WHERE project_id = $1::uuid",
+        [projectId],
+      );
+      const investigationRows = await pool.query<{ projectId: string }>(
+        "SELECT project_id AS \"projectId\" FROM investigations WHERE project_id = $1::uuid",
+        [projectId],
+      );
+      const evidenceRows = await pool.query<{ projectId: string }>(
+        "SELECT project_id AS \"projectId\" FROM evidence_records WHERE project_id = $1::uuid",
+        [projectId],
+      );
+      assert.ok(incidentRows.rows.length > 0);
+      assert.ok(investigationRows.rows.length > 0);
+      assert.ok(evidenceRows.rows.length > 0);
+      assert.ok(incidentRows.rows.every((row) => row.projectId === projectId));
+      assert.ok(investigationRows.rows.every((row) => row.projectId === projectId));
+      assert.ok(evidenceRows.rows.every((row) => row.projectId === projectId));
+    }
+
+    const crossProjectEvidence = await pool.query<IdRow>(
+      `
+        SELECT evidence_records.id
+        FROM evidence_records
+        JOIN investigations
+          ON investigations.id = evidence_records.investigation_id
+         AND investigations.project_id = evidence_records.project_id
+        WHERE evidence_records.project_id = $1::uuid
+          AND investigations.project_id <> evidence_records.project_id
+      `,
+      [projectA],
+    );
+    assert.equal(crossProjectEvidence.rows.length, 0);
+
+    const projectAIncidentBResults = await new DocumentChunkRepository(
+      pool,
+    ).searchSimilarChunks(
+      projectA,
+      [1, ...Array<number>(1023).fill(0)],
+      20,
+      secondIncident,
+    );
+    assert.deepEqual(
+      new Set(projectAIncidentBResults?.map((result) => result.content)),
+      new Set([
+        `${syntheticMarker} project A incident B evidence`,
+        `${syntheticMarker} project A general evidence`,
+      ]),
+    );
+
     const repository = new DocumentChunkRepository(pool);
     const queryEmbedding = [1, ...Array<number>(1023).fill(0)];
     const projectAResults = await repository.searchSimilarChunks(

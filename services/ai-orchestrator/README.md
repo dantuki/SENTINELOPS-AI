@@ -56,6 +56,16 @@ Para probar una generación mediante el modelo local:
 curl --max-time 90 -sS http://127.0.0.1:8001/chat -H "Content-Type: application/json" -d "{\"prompt\":\"Responde en español y brevemente: ¿qué revisarías primero ante un error HTTP 503?\"}"
 ```
 
+Para solicitar una respuesta JSON del modelo local, incluye `response_format`:
+
+```cmd
+curl --max-time 90 -sS http://127.0.0.1:8001/chat -H "Content-Type: application/json" -d "{\"prompt\":\"Devuelve un objeto JSON con un campo summary.\",\"response_format\":\"json\"}"
+```
+
+El formato JSON restringe la salida del modelo; el servicio consumidor sigue siendo responsable de validar el esquema y el contenido.
+
+En la investigación INC-001, Product API envía al orquestador el esquema JSON de la respuesta esperada. El orquestador lo reenvía a Ollama como formato estructurado; Product API conserva la validación autoritativa del contrato, las citas y las reglas semánticas.
+
 ## Pruebas automatizadas
 
 Desde el directorio `services\ai-orchestrator`, ejecuta:

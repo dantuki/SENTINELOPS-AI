@@ -2,6 +2,9 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+import json
+from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -11,6 +14,7 @@ import sentinelops_ai_orchestrator.app as orchestrator
 from sentinelops_ai_orchestrator.app import (
     EMBEDDING_DIMENSIONS,
     EMBEDDING_MODEL,
+    INVESTIGATION_ANALYSIS_SCHEMA,
     EmbeddingProviderRequestError,
     EmbeddingProviderTimeout,
     EmbeddingProviderUnavailable,
@@ -25,6 +29,17 @@ from sentinelops_ai_orchestrator.app import (
 
 
 client = TestClient(app)
+
+def test_investigation_schema_matches_the_shared_contract() -> None:
+    schema_path = (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "shared-contracts"
+        / "schemas"
+        / "investigation-analysis.schema.json"
+    )
+    shared_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert INVESTIGATION_ANALYSIS_SCHEMA == shared_schema
 
 
 class FakeOllamaResponse:
@@ -187,10 +202,17 @@ def test_warmup_loads_and_verifies_both_configured_models(
         assert texts == ["SentinelOps model warm-up."]
         return EMBEDDING_MODEL, [[0.0] * EMBEDDING_DIMENSIONS]
 
-    async def chat(prompt: str, max_tokens: int) -> tuple[str, str]:
+    async def chat(
+        prompt: str,
+        max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
+    ) -> tuple[str, str]:
         calls.append("chat")
         assert prompt == "Responde solo con la palabra listo."
         assert max_tokens == 8
+        assert response_format == "text"
+        assert response_schema is None
         return "qwen3.5:4b", "listo"
 
     async def loaded_models() -> set[str]:
@@ -222,7 +244,12 @@ def test_warmup_preserves_model_timeout_errors() -> None:
     ) -> tuple[str, list[list[float]]]:
         return EMBEDDING_MODEL, [[0.0] * EMBEDDING_DIMENSIONS]
 
-    async def chat(prompt: str, max_tokens: int) -> tuple[str, str]:
+    async def chat(
+        prompt: str,
+        max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
+    ) -> tuple[str, str]:
         raise LocalModelTimeout
 
     app.dependency_overrides[get_embedding_generator] = (
@@ -543,9 +570,12 @@ def test_chat_returns_response_from_local_model() -> None:
     async def fake_generator(
         prompt: str,
         max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
     ) -> tuple[str, str]:
         assert prompt == "Investiga un error HTTP 503."
         assert max_tokens == 1536
+        assert response_format == "text"
         return "qwen3.5:4b", "Revisaría primero los logs."
 
     app.dependency_overrides[get_local_chat_generator] = (
@@ -568,9 +598,13 @@ def test_chat_forwards_a_bounded_token_budget() -> None:
     async def fake_generator(
         prompt: str,
         max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
     ) -> tuple[str, str]:
         assert prompt == "Investiga INC-001."
         assert max_tokens == 320
+        assert response_format == "json"
+        assert response_schema == {"type": "object", "required": ["answer"]}
         return "qwen3.5:4b", "Respuesta concisa."
 
     app.dependency_overrides[get_local_chat_generator] = (
@@ -579,7 +613,12 @@ def test_chat_forwards_a_bounded_token_budget() -> None:
 
     response = client.post(
         "/chat",
-        json={"prompt": "Investiga INC-001.", "max_tokens": 320},
+        json={
+            "prompt": "Investiga INC-001.",
+            "max_tokens": 320,
+            "response_format": "json",
+            "response_schema": {"type": "object", "required": ["answer"]},
+        },
     )
 
     assert response.status_code == 200
@@ -619,6 +658,66 @@ def test_generate_local_chat_rejects_a_token_limited_response(
         "num_predict": 1024,
         "temperature": 0.1,
     }
+    assert "format" not in mock_client.request_json
+
+
+def test_generate_local_chat_requests_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": "qwen3.5:4b",
+                "message": {"content": '{"summary":"Evidencia."}'},
+                "done": True,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda *, timeout: mock_client,
+    )
+
+    model, response = asyncio.run(
+        orchestrator.generate_local_chat(
+            "Devuelve JSON.",
+            response_format="json",
+        )
+    )
+
+    assert model == "qwen3.5:4b"
+    assert response == '{"summary":"Evidencia."}'
+    assert mock_client.request_json["format"] == "json"
+
+
+def test_generate_local_chat_forwards_the_investigation_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": "qwen3.5:4b",
+                "message": {"content": '{"summary":"Evidencia."}'},
+                "done": True,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        lambda *, timeout: mock_client,
+    )
+
+    asyncio.run(
+        orchestrator.generate_local_chat(
+            "Devuelve una investigación.",
+            response_format="json",
+            response_schema=INVESTIGATION_ANALYSIS_SCHEMA,
+        )
+    )
+
+    assert mock_client.request_json["format"] == INVESTIGATION_ANALYSIS_SCHEMA
 
 
 def test_chat_rejects_blank_prompt() -> None:
@@ -639,10 +738,41 @@ def test_chat_rejects_token_budgets_above_the_existing_cap() -> None:
     assert response.status_code == 422
 
 
+def test_chat_rejects_a_schema_outside_json_mode() -> None:
+    response = client.post(
+        "/chat",
+        json={
+            "prompt": "status",
+            "response_format": "text",
+            "response_schema": {"type": "object"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "A response schema requires JSON response format."
+    }
+
+
+def test_chat_rejects_an_oversized_response_schema() -> None:
+    response = client.post(
+        "/chat",
+        json={
+            "prompt": "status",
+            "response_format": "json",
+            "response_schema": {"description": "x" * 17_000},
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_chat_returns_503_when_local_model_is_unavailable() -> None:
     async def unavailable_generator(
         prompt: str,
         max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
     ) -> tuple[str, str]:
         raise LocalModelUnavailable
 
@@ -665,6 +795,8 @@ def test_chat_returns_504_when_local_model_times_out() -> None:
     async def timeout_generator(
         prompt: str,
         max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
     ) -> tuple[str, str]:
         raise LocalModelTimeout
 
@@ -687,6 +819,8 @@ def test_chat_returns_502_for_invalid_model_response() -> None:
     async def invalid_generator(
         prompt: str,
         max_tokens: int,
+        response_format: Literal["text", "json"],
+        response_schema: dict[str, object] | None = None,
     ) -> tuple[str, str]:
         raise LocalModelResponseError
 

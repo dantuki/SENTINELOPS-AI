@@ -1,5 +1,8 @@
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from "fastify";
 import { AuthRepository } from "./auth-repository.js";
 import { registerAuthRoutes } from "./auth-routes.js";
 import {
@@ -53,7 +56,7 @@ interface PostgresDependencyErrorResponse {
 }
 
 interface BuildAppOptions {
-  logger?: boolean;
+  logger?: FastifyServerOptions["logger"];
   aiOrchestratorUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
