@@ -31,7 +31,7 @@ const runId = randomBytes(16).toString("hex");
 const containerName = `sentinelops-postgres-integration-${runId}`;
 const cidfilePath = resolve(tmpdir(), `${containerName}.cid`);
 const apiDirectory = fileURLToPath(new URL("../", import.meta.url));
-const migrations = ["001", "002", "003", "004", "005", "006", "007"];
+const migrations = ["001", "002", "003", "004", "005", "006", "007", "008"];
 const termination = new TerminationController();
 
 function throwIfTerminated(): void {
@@ -170,7 +170,7 @@ async function verifyMigrations(port: number): Promise<void> {
       applied.rows.map((row) => row.version).join(",") !==
       migrations.join(",")
     ) {
-      throw new Error("Expected migration versions 001 through 007.");
+      throw new Error("Expected migration versions 001 through 008.");
     }
     const tables = await pool.query<{ missing: string[] }>(
       `
@@ -193,6 +193,8 @@ async function verifyMigrations(port: number): Promise<void> {
         "project_memberships",
         "security_audit_events",
         "auth_login_rate_limits",
+        "retrieval_events",
+        "retrieval_event_items",
       ]],
     );
     if (tables.rows[0]?.missing?.length) {

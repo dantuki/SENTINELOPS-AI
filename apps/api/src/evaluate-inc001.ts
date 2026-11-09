@@ -3,16 +3,27 @@ import { fileURLToPath } from "node:url";
 
 import {
   containsEvaluationReference,
-  evaluateInc001Response,
-  isInc001EvaluationAccepted,
   parseInc001GroundTruth,
-  type Inc001Evidence,
 } from "./inc001-evaluation.js";
+import {
+  renderInvestigationAnalysis,
+  type InvestigationAnalysis,
+} from "./investigation-analysis.js";
+import {
+  hashChunkContent,
+  isUuid,
+  type EvidenceManifestItem,
+} from "./retrieval-trace.js";
 
 interface InvestigationData {
   model: string;
   response: string;
-  evidence: Inc001Evidence[];
+  evidence: EvidenceManifestItem[];
+  evidenceManifest: EvidenceManifestItem[];
+  runId: string;
+  requestId: string;
+  retrievedAt: string;
+  analysis: InvestigationAnalysis;
 }
 
 interface EvaluationSession {
@@ -40,37 +51,196 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function parseInvestigation(value: unknown): InvestigationData {
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function parseInvestigationAnalysis(value: unknown): InvestigationAnalysis {
   if (
     !isRecord(value) ||
-    !isRecord(value.data) ||
-    typeof value.data.model !== "string" ||
-    typeof value.data.response !== "string" ||
-    !Array.isArray(value.data.evidence)
+    Object.keys(value).sort().join(",") !==
+      [
+        "hypotheses",
+        "limitations",
+        "missing_information",
+        "next_checks",
+        "observed_facts",
+        "summary",
+        "summary_evidence_refs",
+      ]
+        .sort()
+        .join(",") ||
+    typeof value.summary !== "string" ||
+    !isStringArray(value.summary_evidence_refs) ||
+    !Array.isArray(value.observed_facts) ||
+    !Array.isArray(value.hypotheses) ||
+    !isStringArray(value.missing_information) ||
+    !isStringArray(value.next_checks) ||
+    !isStringArray(value.limitations)
+  ) {
+    throw new Error("Investigation analysis has an invalid shape.");
+  }
+  const observedFacts = value.observed_facts.map((fact) => {
+    if (
+      !isRecord(fact) ||
+      Object.keys(fact).sort().join(",") !== "claim,evidence_refs" ||
+      typeof fact.claim !== "string" ||
+      !isStringArray(fact.evidence_refs)
+    ) {
+      throw new Error("Investigation fact has an invalid shape.");
+    }
+    return { claim: fact.claim, evidence_refs: fact.evidence_refs };
+  });
+  const allowedStatuses = new Set([
+    "supported_unconfirmed",
+    "unverified",
+    "contradicted",
+    "insufficient_evidence",
+  ]);
+  const hypotheses = value.hypotheses.map((hypothesis) => {
+    if (
+      !isRecord(hypothesis) ||
+      Object.keys(hypothesis).sort().join(",") !==
+        "contradicting_evidence,statement,status,supporting_evidence" ||
+      typeof hypothesis.statement !== "string" ||
+      typeof hypothesis.status !== "string" ||
+      !allowedStatuses.has(hypothesis.status) ||
+      !isStringArray(hypothesis.supporting_evidence) ||
+      !isStringArray(hypothesis.contradicting_evidence)
+    ) {
+      throw new Error("Investigation hypothesis has an invalid shape.");
+    }
+    return {
+      statement: hypothesis.statement,
+      status: hypothesis.status as InvestigationAnalysis["hypotheses"][number]["status"],
+      supporting_evidence: hypothesis.supporting_evidence,
+      contradicting_evidence: hypothesis.contradicting_evidence,
+    };
+  });
+  return {
+    summary: value.summary,
+    summary_evidence_refs: value.summary_evidence_refs,
+    observed_facts: observedFacts,
+    hypotheses,
+    missing_information: value.missing_information,
+    next_checks: value.next_checks,
+    limitations: value.limitations,
+  };
+}
+
+function parseEvidenceManifest(value: unknown): EvidenceManifestItem[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Product API returned an invalid evidence manifest.");
+  }
+  return value.map((item, index) => {
+    const keys = [
+      "alias",
+      "chunkId",
+      "content",
+      "contentHash",
+      "documentId",
+      "evidenceId",
+      "evidenceScope",
+      "incidentId",
+      "ordinal",
+      "projectId",
+      "rank",
+      "requestId",
+      "retrievedAt",
+      "runId",
+      "score",
+      "sourceId",
+    ].sort();
+    if (
+      !isRecord(item) ||
+      Object.keys(item).sort().join(",") !== keys.join(",") ||
+      !isUuid(item.evidenceId) ||
+      !isUuid(item.chunkId) ||
+      item.evidenceId !== item.chunkId ||
+      item.alias !== `E${index + 1}` ||
+      !isUuid(item.runId) ||
+      !isUuid(item.requestId) ||
+      !isUuid(item.projectId) ||
+      !isUuid(item.documentId) ||
+      !isUuid(item.sourceId) ||
+      (item.incidentId !== null && typeof item.incidentId !== "string") ||
+      !Number.isInteger(item.ordinal) ||
+      Number(item.ordinal) < 0 ||
+      item.rank !== index + 1 ||
+      typeof item.content !== "string" ||
+      item.content.length === 0 ||
+      typeof item.contentHash !== "string" ||
+      item.contentHash !== hashChunkContent(item.content) ||
+      typeof item.score !== "number" ||
+      !Number.isFinite(item.score) ||
+      ![
+        "incident_specific",
+        "project_context",
+        "other_incident",
+        "unknown_scope",
+      ].includes(String(item.evidenceScope)) ||
+      typeof item.retrievedAt !== "string" ||
+      Number.isNaN(Date.parse(item.retrievedAt))
+    ) {
+      throw new Error(`Evidence manifest item ${index + 1} is invalid.`);
+    }
+    return item as unknown as EvidenceManifestItem;
+  });
+}
+
+function parseInvestigation(
+  value: unknown,
+  projectId: string,
+  expectedRunId: string | undefined,
+): InvestigationData {
+  const data = isRecord(value) ? value.data : undefined;
+  if (
+    !isRecord(data) ||
+    Object.keys(data).sort().join(",") !==
+      "analysis,evidence,evidenceManifest,model,requestId,response,retrievedAt,runId" ||
+    typeof data.model !== "string" ||
+    typeof data.response !== "string" ||
+    !isUuid(data.runId) ||
+    !isUuid(data.requestId) ||
+    typeof data.retrievedAt !== "string" ||
+    Number.isNaN(Date.parse(data.retrievedAt)) ||
+    (expectedRunId !== undefined && data.runId !== expectedRunId)
   ) {
     throw new Error("Product API returned an invalid investigation response.");
   }
 
-  const evidence: Inc001Evidence[] = [];
-  for (const item of value.data.evidence) {
-    if (
-      !isRecord(item) ||
-      typeof item.id !== "string" ||
-      typeof item.content !== "string"
-    ) {
-      throw new Error("Investigation evidence has an invalid shape.");
-    }
-
-    evidence.push({
-      id: item.id,
-      content: item.content,
-    });
+  const evidence = parseEvidenceManifest(data.evidence);
+  const evidenceManifest = parseEvidenceManifest(data.evidenceManifest);
+  if (JSON.stringify(evidence) !== JSON.stringify(evidenceManifest)) {
+    throw new Error("Investigation evidence differs from its manifest.");
+  }
+  const analysis = parseInvestigationAnalysis(data.analysis);
+  const response = data.response;
+  const runId = data.runId;
+  const requestId = data.requestId;
+  if (
+    evidence.some(
+      (item) =>
+        item.runId !== runId ||
+        item.requestId !== requestId ||
+        item.projectId !== projectId ||
+        item.incidentId !== "INC-001" ||
+        item.retrievedAt !== data.retrievedAt,
+    ) ||
+    renderInvestigationAnalysis(analysis) !== response
+  ) {
+    throw new Error("Investigation response is not correlated with its manifest.");
   }
 
   return {
-    model: value.data.model,
-    response: value.data.response,
+    model: data.model,
+    response,
     evidence,
+    evidenceManifest,
+    runId,
+    requestId,
+    retrievedAt: data.retrievedAt,
+    analysis,
   };
 }
 
@@ -78,6 +248,7 @@ async function postJson(
   url: URL,
   payload: Record<string, unknown>,
   session: EvaluationSession,
+  traceRunId?: string,
 ): Promise<unknown> {
   const response = await fetch(url, {
     method: "POST",
@@ -87,6 +258,7 @@ async function postJson(
       cookie: session.cookie,
       origin: session.origin,
       "x-csrf-token": session.csrfToken,
+      ...(traceRunId ? { "x-sentinelops-run-id": traceRunId } : {}),
     },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(120_000),
@@ -198,6 +370,7 @@ async function main(): Promise<void> {
     (argument) => argument !== "--skip-ingestion",
   );
   const projectId = positionalArguments[0];
+  const traceRunId = process.env.SENTINELOPS_TRACE_RUN_ID;
   if (
     positionalArguments.length !== 1 ||
     !projectId ||
@@ -208,6 +381,9 @@ async function main(): Promise<void> {
     throw new Error(
       "Provide one existing project UUID and optionally --skip-ingestion.",
     );
+  }
+  if (traceRunId !== undefined && !isUuid(traceRunId)) {
+    throw new Error("SENTINELOPS_TRACE_RUN_ID must be a UUID.");
   }
 
   const apiBase = new URL(
@@ -259,6 +435,7 @@ async function main(): Promise<void> {
       apiBase,
       session,
       projectId,
+      traceRunId,
       skipIngestion,
       warmupDurationMs,
       (stage) => {
@@ -272,6 +449,7 @@ async function runEvaluation(
   apiBase: URL,
   session: EvaluationSession,
   projectId: string,
+  traceRunId: string | undefined,
   skipIngestion: boolean,
   warmupDurationMs: number,
   setStage: (stage: EvaluationStage) => void,
@@ -315,7 +493,10 @@ async function runEvaluation(
         limit: 5,
       },
       session,
+      traceRunId,
     ),
+    projectId,
+    traceRunId,
   );
   const investigationDurationMs =
     Math.round((performance.now() - investigationStartedAt) * 10) / 10;
@@ -331,30 +512,29 @@ async function runEvaluation(
     await readFile(referencePath, "utf8"),
   );
   const groundTruth = parseInc001GroundTruth(rawGroundTruth);
-  const evaluation = evaluateInc001Response(
-    investigation.response,
-    investigation.evidence,
-    groundTruth,
+  const referenceLeaked = containsEvaluationReference(
+    investigation.evidence.map((item) => ({
+      id: item.chunkId,
+      content: item.content,
+    })),
   );
-  const referenceLeaked = containsEvaluationReference(investigation.evidence);
   const abstained =
     investigation.model === "not-invoked" ||
     investigation.evidence.length === 0;
-  const passed = isInc001EvaluationAccepted(
-    investigation.model,
-    investigation.evidence,
-    evaluation,
-  );
-
   console.log(
     JSON.stringify(
       {
+        reportType: "inc001-candidate-v1",
         dataset: groundTruth.dataset,
         incidentId: groundTruth.incident_id,
         model: investigation.model,
         evidenceCount: investigation.evidence.length,
-        evidence: investigation.evidence,
+        runId: investigation.runId,
+        requestId: investigation.requestId,
+        retrievedAt: investigation.retrievedAt,
+        evidenceManifest: investigation.evidenceManifest,
         response: investigation.response,
+        analysis: investigation.analysis,
         ingestion: skipIngestion ? "skipped" : "completed",
         timings: {
           warmupMs: warmupDurationMs,
@@ -363,17 +543,12 @@ async function runEvaluation(
         },
         abstained,
         referenceLeaked,
-        evaluation,
-        passed,
       },
       null,
       2,
     ),
   );
 
-  if (!passed) {
-    process.exitCode = 1;
-  }
 }
 
 void main().catch((error: unknown) => {

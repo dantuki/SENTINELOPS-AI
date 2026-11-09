@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -27,8 +27,10 @@ import {
   createContainerName,
   createRunId,
   createTemporaryDatabaseName,
+  finalizeEvaluationOutput,
   getAnonymousPostgresVolumeName,
   missingOllamaModels,
+  parseEvaluationTraceExpectation,
   parseDockerPort,
   redactSecrets,
   resolveEvaluationResult,
@@ -53,6 +55,10 @@ import {
   type DockerResourceState,
   type ProcessStopState,
 } from "./inc001-runner-lifecycle.js";
+import {
+  RetrievalTraceVerifier,
+  type TraceVerificationReport,
+} from "../src/retrieval-trace-verifier.js";
 
 const apiDirectory = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = resolve(apiDirectory, "..", "..");
@@ -415,7 +421,9 @@ async function verifyMigrations(database: TemporaryDatabase): Promise<void> {
       applied.rows.map((row) => row.version).join(",") !==
       EXPECTED_MIGRATIONS.join(",")
     ) {
-      throw new Error("Expected migration versions 001 through 007.");
+      throw new Error(
+        `Expected migration versions ${EXPECTED_MIGRATIONS.join(", ")}.`,
+      );
     }
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'vector'",
@@ -456,6 +464,8 @@ async function verifyMigrations(database: TemporaryDatabase): Promise<void> {
         "project_memberships",
         "security_audit_events",
         "auth_login_rate_limits",
+        "retrieval_events",
+        "retrieval_event_items",
       ]],
     );
     if (tables.rows[0]?.missing?.length) {
@@ -626,6 +636,7 @@ async function main(): Promise<number> {
   const serviceKey = randomBytes(32).toString("base64url");
   const secrets: string[] = [database.password, serviceKey];
   const runId = createRunId();
+  const traceRunId = randomUUID();
   const containerName = createContainerName(runId);
   const cidfilePath = join(resultDirectory, "container.cid");
 
@@ -637,6 +648,8 @@ async function main(): Promise<number> {
   let orchestrator: ManagedProcess | null = null;
   let evaluator: ManagedProcess | null = null;
   let evaluatorExitCode: number | null = null;
+  let evaluationExitCode: number | null = null;
+  let finalizedEvaluationOutput: string | null = null;
   let runnerError: string | null = null;
   let failureStage: string | null = null;
   const termination = new TerminationController();
@@ -1015,10 +1028,13 @@ async function main(): Promise<number> {
       ["--import=tsx", "src/evaluate-inc001.ts", seeded.projectId],
       {
         cwd: apiDirectory,
-        env: buildEvaluatorEnvironment(endpoints, {
-          email: seeded.evaluatorEmail,
-          password: seeded.evaluatorPassword,
-        }),
+        env: {
+          ...buildEvaluatorEnvironment(endpoints, {
+            email: seeded.evaluatorEmail,
+            password: seeded.evaluatorPassword,
+          }),
+          SENTINELOPS_TRACE_RUN_ID: traceRunId,
+        },
       },
       secrets,
     );
@@ -1053,6 +1069,40 @@ async function main(): Promise<number> {
       );
     }
     evaluatorExitCode = outcome.code;
+    evaluationExitCode = outcome.code;
+    if (outcome.code === 0) {
+      const candidateOutput = evaluator.stdout.trim();
+      const expectation = parseEvaluationTraceExpectation(
+        candidateOutput,
+        groundTruth,
+        traceRunId,
+        seeded.projectId,
+      );
+      const tracePool = makePool(database);
+      let traceVerification: TraceVerificationReport;
+      try {
+        await assertDatabaseIdentity(tracePool, database);
+        traceVerification = await new RetrievalTraceVerifier(
+          tracePool,
+        ).verifyTrace(expectation);
+      } finally {
+        await tracePool.end();
+      }
+      finalizedEvaluationOutput = finalizeEvaluationOutput(
+        candidateOutput,
+        groundTruth,
+        traceRunId,
+        traceVerification,
+      );
+      const verifiedSummary = summarizeEvaluationOutput(
+        finalizedEvaluationOutput,
+        groundTruth,
+      );
+      if (!verifiedSummary.parsed) {
+        throw new Error("The verified evaluation report is invalid.");
+      }
+      evaluationExitCode = verifiedSummary.passed === true ? 0 : 1;
+    }
   } catch (error: unknown) {
     failureStage = currentPhase;
     runnerError = redactSecrets(
@@ -1077,11 +1127,12 @@ async function main(): Promise<number> {
     }
   }
 
-  const evaluatorStdout = evaluator?.stdout.trim() ?? "";
+  const evaluatorStdout =
+    finalizedEvaluationOutput ?? evaluator?.stdout.trim() ?? "";
   const summary = summarizeEvaluationOutput(evaluatorStdout, groundTruth);
   let result = resolveEvaluationResult(
     summary,
-    evaluatorExitCode,
+    evaluationExitCode,
     cleanupReport.success,
     runnerError,
     termination.reason,
@@ -1116,9 +1167,11 @@ async function main(): Promise<number> {
           startedAt: startedAt.toISOString(),
           finishedAt: finishedAt.toISOString(),
           runId,
+          traceRunId,
           phase: currentPhase,
           failureStage,
           evaluatorExitCode,
+          evaluationExitCode,
           passed: summary.passed,
           status: result.status,
           evaluationStatus: result.evaluationStatus,
@@ -1153,7 +1206,8 @@ async function main(): Promise<number> {
             postgresImage: POSTGRES_IMAGE,
           },
           isolation: {
-            runId,
+            containerRunId: runId,
+            traceRunId,
             container: containerName,
             database: database.database,
             postgresPort: database.port,
@@ -1179,7 +1233,7 @@ async function main(): Promise<number> {
 
   result = resolveEvaluationResult(
     summary,
-    evaluatorExitCode,
+    evaluationExitCode,
     cleanupReport.success,
     runnerError,
     termination.reason,

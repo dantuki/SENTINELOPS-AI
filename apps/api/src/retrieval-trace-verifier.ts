@@ -1,48 +1,311 @@
 import type { Pool } from "pg";
-import { hashChunkContent, type EvidenceManifestItem } from "./retrieval-trace.js";
 
-export interface EvidenceVerification {
-  evidenceId: string;
+import type { EvidenceVerificationStatus } from "./inc001-evaluation.js";
+import {
+  classifyEvidenceScope,
+  hashChunkContent,
+  isUuid,
+  type EvidenceManifestItem,
+} from "./retrieval-trace.js";
+
+export interface TraceVerificationReport {
   status: "verified" | "unverified" | "failed";
-  checks: string[];
+  verifiedCount: number;
+  unverifiedCount: number;
+  failedCount: number;
+  verificationErrors: string[];
+  verifiedEvidenceIds: string[];
+  requestId: string;
+  runId: string;
+  evidence: EvidenceVerificationStatus[];
+}
+
+export interface RetrievalTraceExpectation {
+  runId: string;
+  requestId: string;
+  projectId: string;
+  incidentId: string | null;
+  retrievedAt: string;
+  manifest: EvidenceManifestItem[];
+}
+
+interface TraceRow {
+  runId: string;
+  requestId: string;
+  projectId: string;
+  incidentId: string | null;
+  retrievedAt: Date | string;
+  rank: number | null;
+  chunkId: string | null;
+  documentId: string | null;
+  sourceId: string | null;
+  projectItemId: string | null;
+  ordinal: number | null;
+  score: number | null;
+  contentHash: string | null;
+  evidenceScope: string | null;
+  itemRetrievedAt: Date | string | null;
+  content: string | null;
+  metadata: Record<string, unknown> | null;
+  documentSourceId: string | null;
+  documentStatus: string | null;
+  sourceStatus: string | null;
+}
+
+function isoTimestamp(value: Date | string | null): string | null {
+  if (value === null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function invalidManifestItem(item: EvidenceManifestItem, index: number): string[] {
+  const errors: string[] = [];
+  if (!isUuid(item.evidenceId) || item.evidenceId !== item.chunkId) {
+    errors.push(`manifest_item_${index + 1}_canonical_chunk_identity_mismatch`);
+  }
+  if (item.alias !== `E${index + 1}` || item.rank !== index + 1) {
+    errors.push(`manifest_item_${index + 1}_alias_or_rank_mismatch`);
+  }
+  if (
+    !isUuid(item.runId) ||
+    !isUuid(item.requestId) ||
+    !isUuid(item.projectId) ||
+    !isUuid(item.documentId) ||
+    !isUuid(item.sourceId)
+  ) {
+    errors.push(`manifest_item_${index + 1}_invalid_uuid`);
+  }
+  if (
+    !Number.isInteger(item.ordinal) ||
+    item.ordinal < 0 ||
+    !Number.isFinite(item.score) ||
+    item.content.length === 0 ||
+    item.contentHash !== hashChunkContent(item.content) ||
+    isoTimestamp(item.retrievedAt) === null
+  ) {
+    errors.push(`manifest_item_${index + 1}_invalid_content_or_metrics`);
+  }
+  return errors;
 }
 
 /**
- * Verifies only against the caller-provided isolated-run pool. It never creates
- * a connection, writes SQL, or reads environment variables, so the runner is
- * responsible for supplying its temporary database connection exclusively.
+ * Verifies one complete retrieval event using only the supplied read-only
+ * database pool. It does not create connections or consult environment state.
  */
 export class RetrievalTraceVerifier {
   constructor(private readonly pool: Pick<Pool, "query">) {}
 
-  async verify(item: EvidenceManifestItem): Promise<EvidenceVerification> {
-    const result = await this.pool.query<{
-      requestId: string; runId: string; projectId: string; incidentId: string | null;
-      chunkId: string; documentId: string; sourceId: string; ordinal: number;
-      content: string; contentHash: string; evidenceScope: string;
-      documentStatus: string; sourceStatus: string;
-    }>(
-      `SELECT event.request_id AS "requestId", event.run_id AS "runId", event.project_id AS "projectId", event.incident_id AS "incidentId",
-        item.chunk_id AS "chunkId", item.document_id AS "documentId", item.source_id AS "sourceId", item.ordinal,
-        chunk.content, item.content_sha256 AS "contentHash", item.evidence_scope AS "evidenceScope",
-        document.status AS "documentStatus", source.status AS "sourceStatus"
-       FROM retrieval_events event
-       JOIN retrieval_event_items item ON item.request_id = event.request_id
-       JOIN document_chunks chunk ON chunk.id = item.chunk_id AND chunk.project_id = item.project_id AND chunk.document_id = item.document_id
-       JOIN documents document ON document.id = item.document_id AND document.project_id = item.project_id
-       JOIN project_sources source ON source.id = item.source_id AND source.project_id = item.project_id AND document.source_id = source.id
-       WHERE event.request_id = $1::uuid AND event.run_id = $2::uuid AND event.project_id = $3::uuid
-         AND item.chunk_id = $4::uuid AND item.rank = $5`,
-      [item.requestId, item.runId, item.projectId, item.chunkId, item.rank],
+  async verifyTrace(
+    expected: RetrievalTraceExpectation,
+  ): Promise<TraceVerificationReport> {
+    const verificationErrors: string[] = [];
+    const manifest = expected.manifest;
+    const evidence = manifest.map<EvidenceVerificationStatus>((item) => ({
+      evidenceId: item.evidenceId,
+      status: "failed",
+    }));
+
+    if (
+      !isUuid(expected.runId) ||
+      !isUuid(expected.requestId) ||
+      !isUuid(expected.projectId) ||
+      isoTimestamp(expected.retrievedAt) === null
+    ) {
+      verificationErrors.push("expected_trace_identity_invalid");
+    }
+
+    const evidenceIds = new Set<string>();
+    for (let index = 0; index < manifest.length; index += 1) {
+      const item = manifest[index]!;
+      verificationErrors.push(...invalidManifestItem(item, index));
+      if (evidenceIds.has(item.evidenceId)) {
+        verificationErrors.push(`manifest_item_${index + 1}_duplicate_evidence_id`);
+      }
+      evidenceIds.add(item.evidenceId);
+      if (
+        item.runId !== expected.runId ||
+        item.requestId !== expected.requestId ||
+        item.projectId !== expected.projectId ||
+        item.incidentId !== expected.incidentId ||
+        isoTimestamp(item.retrievedAt) !== isoTimestamp(expected.retrievedAt)
+      ) {
+        verificationErrors.push(`manifest_item_${index + 1}_trace_header_mismatch`);
+      }
+    }
+
+    const result = await this.pool.query<TraceRow>(
+      `SELECT
+         event.run_id AS "runId",
+         event.request_id AS "requestId",
+         event.project_id AS "projectId",
+         event.incident_id AS "incidentId",
+         event.retrieved_at AS "retrievedAt",
+         item.rank,
+         item.chunk_id AS "chunkId",
+         item.document_id AS "documentId",
+         item.source_id AS "sourceId",
+         item.project_id AS "projectItemId",
+         item.ordinal,
+         item.score,
+         item.content_sha256 AS "contentHash",
+         item.evidence_scope AS "evidenceScope",
+         item.retrieved_at AS "itemRetrievedAt",
+         chunk.content,
+         chunk.metadata,
+         document.source_id AS "documentSourceId",
+         document.status AS "documentStatus",
+         source.status AS "sourceStatus"
+       FROM retrieval_events AS event
+       LEFT JOIN retrieval_event_items AS item
+         ON item.request_id = event.request_id
+       LEFT JOIN document_chunks AS chunk
+         ON chunk.id = item.chunk_id
+        AND chunk.project_id = item.project_id
+        AND chunk.document_id = item.document_id
+       LEFT JOIN documents AS document
+         ON document.id = item.document_id
+        AND document.project_id = item.project_id
+       LEFT JOIN project_sources AS source
+         ON source.id = item.source_id
+        AND source.project_id = item.project_id
+       WHERE event.request_id = $1::uuid
+       ORDER BY item.rank NULLS FIRST`,
+      [expected.requestId],
     );
-    const row = result.rows[0];
-    if (!row) return { evidenceId: item.evidenceId, status: "failed", checks: ["trace_item_not_found_same_run"] };
-    const checks: string[] = [];
-    if (row.incidentId !== item.incidentId) checks.push("incident_mismatch");
-    if (row.documentId !== item.documentId || row.sourceId !== item.sourceId || row.ordinal !== item.ordinal) checks.push("lineage_mismatch");
-    if (row.documentStatus !== "indexed" || row.sourceStatus !== "active") checks.push("inactive_lineage");
-    if (row.content !== item.content || hashChunkContent(row.content) !== item.contentHash || row.contentHash !== item.contentHash) checks.push("content_hash_mismatch");
-    if (row.evidenceScope !== item.evidenceScope) checks.push("scope_mismatch");
-    return { evidenceId: item.evidenceId, status: checks.length === 0 ? "verified" : "failed", checks };
+
+    if (result.rows.length === 0) {
+      verificationErrors.push("retrieval_event_header_missing");
+      return this.report(expected, evidence, verificationErrors, manifest.length);
+    }
+
+    const header = result.rows[0]!;
+    if (
+      header.runId !== expected.runId ||
+      header.requestId !== expected.requestId ||
+      header.projectId !== expected.projectId ||
+      header.incidentId !== expected.incidentId ||
+      isoTimestamp(header.retrievedAt) !== isoTimestamp(expected.retrievedAt)
+    ) {
+      verificationErrors.push("retrieval_event_header_mismatch");
+    }
+
+    const rows = result.rows.filter((row) => row.rank !== null);
+    if (rows.length !== manifest.length) {
+      verificationErrors.push(
+        `retrieval_event_cardinality_mismatch_expected_${manifest.length}_actual_${rows.length}`,
+      );
+    }
+
+    for (let index = 0; index < manifest.length; index += 1) {
+      const item = manifest[index]!;
+      const row = rows[index];
+      const checks: string[] = [];
+      if (!row) {
+        checks.push("trace_item_missing");
+      } else {
+        if (
+          row.rank !== item.rank ||
+          row.chunkId !== item.chunkId ||
+          row.documentId !== item.documentId ||
+          row.sourceId !== item.sourceId ||
+          row.projectItemId !== item.projectId ||
+          row.documentSourceId !== item.sourceId ||
+          row.ordinal !== item.ordinal
+        ) {
+          checks.push("lineage_or_order_mismatch");
+        }
+        if (row.score !== item.score) checks.push("score_mismatch");
+        if (
+          row.content === null ||
+          row.content !== item.content ||
+          hashChunkContent(row.content) !== item.contentHash ||
+          row.contentHash !== item.contentHash
+        ) {
+          checks.push("content_or_hash_mismatch");
+        }
+        if (
+          row.documentStatus !== "indexed" ||
+          row.sourceStatus !== "active"
+        ) {
+          checks.push("inactive_or_missing_lineage");
+        }
+        const computedScope = classifyEvidenceScope(
+          row.metadata ?? {},
+          expected.incidentId ?? undefined,
+        );
+        if (
+          row.evidenceScope !== item.evidenceScope ||
+          computedScope !== item.evidenceScope
+        ) {
+          checks.push("scope_mismatch");
+        }
+        if (
+          isoTimestamp(row.itemRetrievedAt) !==
+          isoTimestamp(item.retrievedAt)
+        ) {
+          checks.push("retrieval_timestamp_mismatch");
+        }
+      }
+      const manifestErrors = invalidManifestItem(item, index);
+      const status =
+        checks.length === 0 &&
+        manifestErrors.length === 0 &&
+        verificationErrors.length === 0
+          ? "verified"
+          : "failed";
+      evidence[index] = {
+        evidenceId: item.evidenceId,
+        status,
+      };
+      if (checks.length > 0) {
+        verificationErrors.push(
+          `manifest_item_${index + 1}_${checks.join("_")}`,
+        );
+      }
+    }
+
+    if (rows.length > manifest.length) {
+      verificationErrors.push("retrieval_event_contains_unmanifested_items");
+    }
+    return this.report(expected, evidence, verificationErrors, rows.length);
+  }
+
+  private report(
+    expected: RetrievalTraceExpectation,
+    evidence: EvidenceVerificationStatus[],
+    verificationErrors: string[],
+    storedItemCount: number,
+  ): TraceVerificationReport {
+    const verifiedCount = evidence.filter(
+      ({ status }) => status === "verified",
+    ).length;
+    const failedCount =
+      evidence.filter(({ status }) => status === "failed").length +
+      Math.max(0, storedItemCount - evidence.length);
+    const unverifiedCount = evidence.filter(
+      ({ status }) => status === "unverified",
+    ).length;
+    if (verificationErrors.length > 0 && failedCount === 0) {
+      verificationErrors.push("retrieval_trace_header_or_cardinality_failed");
+    }
+    const status =
+      verificationErrors.length > 0 || failedCount > 0
+        ? "failed"
+        : unverifiedCount > 0
+          ? "unverified"
+          : "verified";
+    return {
+      status,
+      verifiedCount,
+      unverifiedCount,
+      failedCount,
+      verificationErrors: [...new Set(verificationErrors)].sort(),
+      verifiedEvidenceIds: evidence
+        .filter(({ status: itemStatus }) => itemStatus === "verified")
+        .map(({ evidenceId }) => evidenceId),
+      requestId: expected.requestId,
+      runId: expected.runId,
+      evidence,
+    };
   }
 }

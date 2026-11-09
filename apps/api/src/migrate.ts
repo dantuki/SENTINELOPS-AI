@@ -41,6 +41,29 @@ const securityTables = [
   "auth_login_rate_limits",
 ];
 const retrievalTraceTables = ["retrieval_events", "retrieval_event_items"];
+const retrievalTraceIndexes = [
+  "idx_retrieval_events_run_project",
+  "idx_retrieval_event_items_request",
+];
+const retrievalTraceConstraints = [
+  "uq_documents_id_project_source",
+  "pk_retrieval_events",
+  "uq_retrieval_events_run_request",
+  "uq_retrieval_events_request_project",
+  "fk_retrieval_events_project",
+  "pk_retrieval_event_items",
+  "uq_retrieval_event_items_request_chunk",
+  "ck_retrieval_event_items_rank",
+  "ck_retrieval_event_items_ordinal",
+  "ck_retrieval_event_items_score",
+  "ck_retrieval_event_items_content_sha256",
+  "ck_retrieval_event_items_evidence_scope",
+  "fk_retrieval_event_items_event_project",
+  "fk_retrieval_event_items_chunk_lineage",
+  "fk_retrieval_event_items_document_project",
+  "fk_retrieval_event_items_document_source_project",
+  "fk_retrieval_event_items_source_project",
+];
 const migrationLockId = "731029482765013";
 
 function getTransactionalSql(sql: string, filename: string): string {
@@ -210,13 +233,54 @@ async function detectMigrationState(
   }
 
   if (migration.version === "008") {
-    const result = await client.query<{ existing: number }>(
-      `SELECT count(*)::integer AS existing FROM unnest($1::text[]) AS expected(table_name)
-       WHERE to_regclass('public.' || expected.table_name) IS NOT NULL`,
-      [retrievalTraceTables],
+    const result = await client.query<{
+      tables: number;
+      indexes: number;
+      constraints: number;
+      columns: number;
+    }>(
+      `SELECT
+         (
+           SELECT count(*)::integer
+           FROM unnest($1::text[]) AS expected(name)
+           WHERE to_regclass('public.' || expected.name) IS NOT NULL
+         ) AS tables,
+         (
+           SELECT count(*)::integer
+           FROM unnest($2::text[]) AS expected(name)
+           WHERE to_regclass('public.' || expected.name) IS NOT NULL
+         ) AS indexes,
+         (
+           SELECT count(DISTINCT constraint_row.conname)::integer
+           FROM pg_constraint AS constraint_row
+           WHERE constraint_row.conname = ANY($3::text[])
+         ) AS constraints,
+         (
+           SELECT count(*)::integer
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND (table_name, column_name) IN (
+               ('retrieval_events', 'retrieved_at'),
+               ('retrieval_event_items', 'retrieved_at'),
+               ('retrieval_event_items', 'content_sha256'),
+               ('retrieval_event_items', 'evidence_scope')
+             )
+         ) AS columns`,
+      [retrievalTraceTables, retrievalTraceIndexes, retrievalTraceConstraints],
     );
-    const existing = result.rows[0]?.existing ?? 0;
-    return existing === retrievalTraceTables.length ? "applied" : existing === 0 ? "pending" : "partial";
+    const signature = result.rows[0];
+    if (
+      signature?.tables === retrievalTraceTables.length &&
+      signature.indexes === retrievalTraceIndexes.length &&
+      signature.constraints === retrievalTraceConstraints.length &&
+      signature.columns === 4
+    ) {
+      return "applied";
+    }
+    return signature?.tables === 0 && signature.indexes === 0 &&
+      signature.constraints === 0 && signature.columns === 0
+      ? "pending"
+      : "partial";
   }
 
   return "pending";

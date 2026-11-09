@@ -1500,6 +1500,7 @@ function createFakeEmbeddingStore(
                 id: chunkTestRecord.id,
                 projectId: sourceTestProjectId,
                 documentId: documentTestRecord.id,
+                sourceId: sourceTestRecord.id,
                 ordinal: chunkTestRecord.ordinal,
                 content: chunkTestRecord.content,
                 score: 0.91,
@@ -1976,8 +1977,14 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
   assert.ok(payload.data.response.includes("[E1]"));
 
   assert.equal(payload.data.evidence.length, 1);
-  assert.equal(payload.data.evidence[0].id, chunkTestRecord.id);
-  assert.equal(payload.data.evidence[0].similarity, 0.91);
+  assert.equal(payload.data.evidence[0].chunkId, chunkTestRecord.id);
+  assert.equal(payload.data.evidence[0].score, 0.91);
+  assert.equal(payload.data.evidence[0].sourceId, sourceTestRecord.id);
+  assert.equal(payload.data.evidence[0].requestId, payload.data.requestId);
+  assert.deepEqual(
+    payload.data.evidence,
+    payload.data.evidenceManifest,
+  );
 });
 
 test("POST project investigate rejects model citations outside retrieved evidence", async () => {
@@ -2382,7 +2389,9 @@ test("incident investigation retains measured relevant evidence above its calibr
       searchSimilarChunks: async () => [
         {
           ...chunkTestRecord,
+          sourceId: sourceTestRecord.id,
           score: 0.414,
+          metadata: { incidentId: "INC-001" },
         },
       ],
     }),
@@ -2416,7 +2425,7 @@ test("incident investigation retains measured relevant evidence above its calibr
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().data.model, "qwen3.5:4b");
-  assert.equal(response.json().data.evidence[0].similarity, 0.414);
+  assert.equal(response.json().data.evidence[0].score, 0.414);
   assert.deepEqual(requestedUrls, [
     "http://127.0.0.1:8001/embeddings",
     "http://127.0.0.1:8001/chat",
