@@ -15,6 +15,7 @@ import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerSourceRoutes } from "./source-routes.js";
 import { ProjectSourceRepository } from "./source-repository.js";
+import { PostgresRetrievalTraceStore } from "./retrieval-trace.js";
 
 function createPostgresPool(): Pool | undefined {
   const database = process.env.POSTGRES_DB;
@@ -106,7 +107,9 @@ async function main(): Promise<void> {
       incidents: productRepository,
     },
   );
-  registerInvestigationRoutes(app, chunkRepository);
+  registerInvestigationRoutes(app, chunkRepository, {
+    ...(postgresPool ? { traceStore: new PostgresRetrievalTraceStore(postgresPool) } : {}),
+  });
   registerChatRoutes(app);
 
   postgresPool?.on("error", () => {

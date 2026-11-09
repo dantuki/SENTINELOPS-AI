@@ -41,9 +41,14 @@ export interface SemanticSearchChunkRecord {
   id: string;
   projectId: string;
   documentId: string;
+  sourceId?: string;
   ordinal: number;
   content: string;
   score: number;
+  /** Server-owned chunk metadata used solely to classify retrieval scope. */
+  metadata?: Record<string, unknown>;
+  documentStatus?: "indexed";
+  sourceStatus?: "active";
 }
 
 export class EmbeddingWriteConflictError extends Error {
@@ -427,8 +432,12 @@ export class DocumentChunkRepository {
           chunk.id,
           chunk.project_id AS "projectId",
           chunk.document_id AS "documentId",
+          document.source_id AS "sourceId",
           chunk.ordinal,
           chunk.content,
+          chunk.metadata,
+          document.status AS "documentStatus",
+          source.status AS "sourceStatus",
           (1 - (chunk.embedding <=> $2::vector))::double precision AS score
         FROM document_chunks AS chunk
         JOIN documents AS document

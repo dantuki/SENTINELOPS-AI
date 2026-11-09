@@ -20,6 +20,7 @@ export const EXPECTED_MIGRATIONS = [
   "005",
   "006",
   "007",
+  "008",
 ] as const;
 export const REQUIRED_OLLAMA_MODELS = [
   "qwen3.5:4b",

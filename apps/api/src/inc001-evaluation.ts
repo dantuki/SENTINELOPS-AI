@@ -1,11 +1,32 @@
 export interface Inc001Evidence {
   id: string;
   content: string;
+  alias?: string;
+  evidenceScope?: "incident_specific" | "project_context" | "other_incident" | "unknown_scope";
+}
+
+export interface Inc001Observation {
+  id: string;
+  /** Optional only for legacy unit fixtures; parseInc001GroundTruth always supplies these. */
+  description?: string;
+  source?: string;
+  supporting_log?: string;
+  timestamp_utc?: string;
+  request_id?: string;
 }
 
 export interface Inc001GroundTruth {
-  expected_observations: Array<{ id: string }>;
+  expected_observations: Inc001Observation[];
+  classification?: "synthetic_evaluation_reference";
+  ingestion_policy?: "evaluation_only_do_not_ingest";
+  best_supported_hypothesis?: {
+    statement: string;
+    classification: "supported_hypothesis_not_proven_root_cause";
+    supporting_observations: string[];
+    limitations: string[];
+  };
   must_not_claim: string[];
+  evaluation_rubric?: string[];
 }
 
 export interface Inc001EvaluationReference extends Inc001GroundTruth {
@@ -47,16 +68,26 @@ export function parseInc001GroundTruth(
     throw new Error("INC-001 evaluation reference has an invalid shape.");
   }
 
-  const expectedObservations: Array<{ id: string }> = [];
+  const expectedObservations: Inc001Observation[] = [];
   for (const observation of value.expected_observations) {
     if (
       !isRecord(observation) ||
       typeof observation.id !== "string" ||
-      observation.id.length === 0
+      observation.id.length === 0 ||
+      typeof observation.description !== "string" ||
+      typeof observation.source !== "string" ||
+      (observation.supporting_log !== undefined && typeof observation.supporting_log !== "string") ||
+      (observation.timestamp_utc !== undefined && typeof observation.timestamp_utc !== "string") ||
+      (observation.request_id !== undefined && typeof observation.request_id !== "string")
     ) {
       throw new Error("INC-001 observation reference has an invalid shape.");
     }
-    expectedObservations.push({ id: observation.id });
+    expectedObservations.push({
+      id: observation.id, description: observation.description, source: observation.source,
+      ...(typeof observation.supporting_log === "string" ? { supporting_log: observation.supporting_log } : {}),
+      ...(typeof observation.timestamp_utc === "string" ? { timestamp_utc: observation.timestamp_utc } : {}),
+      ...(typeof observation.request_id === "string" ? { request_id: observation.request_id } : {}),
+    });
   }
 
   if (
@@ -79,6 +110,9 @@ export function parseInc001GroundTruth(
     incident_id: "INC-001",
     expected_observations: expectedObservations,
     must_not_claim: mustNotClaim,
+    ...(value.classification === "synthetic_evaluation_reference" ? { classification: value.classification } : {}),
+    ...(value.ingestion_policy === "evaluation_only_do_not_ingest" ? { ingestion_policy: value.ingestion_policy } : {}),
+    ...(Array.isArray(value.evaluation_rubric) && value.evaluation_rubric.every((item) => typeof item === "string") ? { evaluation_rubric: value.evaluation_rubric } : {}),
   };
 }
 

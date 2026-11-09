@@ -294,3 +294,6 @@ Antes de avanzar al siguiente hito se debe registrar:
 - Servicios Docker del proyecto: todavía no creados ni probados.
 - Fase 0: en curso.
 - Siguiente entregable: `docs/ARCHITECTURE.md`.
+# Evidence provenance increment — implemented code, NOT_VERIFIED against infrastructure
+
+Additive migration `008_add_retrieval_trace.sql` defines retrieval-event headers and ordered items. The Product API writes them before invoking the model. The evaluator integration remains to be exercised only in an isolated temporary PostgreSQL run; do not treat mocked or static validation as a closed gate.

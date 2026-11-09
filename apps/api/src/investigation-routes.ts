@@ -1,10 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { getAiServiceAuthHeaders } from "./ai-service-auth.js";
+import { randomUUID } from "node:crypto";
 
 import type {
   SemanticSearchChunkRecord,
 } from "./chunk-repository.js";
 import { detectFactualityViolations } from "./inc001-evaluation.js";
+import {
+  buildEvidenceManifest,
+  MemoryRetrievalTraceStore,
+  type EvidenceManifestItem,
+  type RetrievalTraceStore,
+} from "./retrieval-trace.js";
 
 const EMBEDDING_DIMENSIONS = 1024;
 const MAX_TEXT_CHARS = 20_000;
@@ -40,10 +47,14 @@ interface InvestigationRequest {
 
 interface EvidenceCitation {
   id: string;
+  alias: string;
+  sourceId: string;
   documentId: string;
   ordinal: number;
   content: string;
   similarity: number;
+  contentHash: string;
+  evidenceScope: "incident_specific" | "project_context" | "other_incident" | "unknown_scope";
 }
 
 interface InvestigationResponse {
@@ -51,6 +62,9 @@ interface InvestigationResponse {
     model: string;
     response: string;
     evidence: EvidenceCitation[];
+    runId: string;
+    requestId: string;
+    evidenceManifest: EvidenceManifestItem[];
     analysis: InvestigationAnalysis;
   };
 }
@@ -92,6 +106,7 @@ interface InvestigationRouteOptions {
   fetchImpl?: typeof fetch;
   embeddingTimeoutMs?: number;
   chatTimeoutMs?: number;
+  traceStore?: RetrievalTraceStore;
 }
 
 interface ParsedEmbedding {
@@ -117,17 +132,25 @@ const evidenceSchema = {
   type: "object",
   properties: {
     id: uuidSchema,
+    alias: { type: "string", pattern: "^E[1-9][0-9]*$" },
+    sourceId: uuidSchema,
     documentId: uuidSchema,
     ordinal: { type: "integer", minimum: 0 },
     content: { type: "string" },
     similarity: { type: "number" },
+    contentHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    evidenceScope: { type: "string", enum: ["incident_specific", "project_context", "other_incident", "unknown_scope"] },
   },
   required: [
     "id",
+    "alias",
+    "sourceId",
     "documentId",
     "ordinal",
     "content",
     "similarity",
+    "contentHash",
+    "evidenceScope",
   ],
   additionalProperties: false,
 } as const;
@@ -242,8 +265,11 @@ const investigationResponseSchema = {
           items: evidenceSchema,
         },
         analysis: analysisSchema,
+        runId: uuidSchema,
+        requestId: uuidSchema,
+        evidenceManifest: { type: "array" },
       },
-      required: ["model", "response", "evidence", "analysis"],
+      required: ["model", "response", "evidence", "analysis", "runId", "requestId", "evidenceManifest"],
       additionalProperties: false,
     },
   },
@@ -857,6 +883,8 @@ export function registerInvestigationRoutes(
 
   const chatTimeoutMs =
     options.chatTimeoutMs ?? 90_000;
+  // Tests deliberately use an in-memory adapter; server.ts always supplies PostgreSQL.
+  const traceStore = options.traceStore ?? new MemoryRetrievalTraceStore();
 
   app.post<{
     Params: { projectId: string };
@@ -1105,19 +1133,29 @@ export function registerInvestigationRoutes(
         : MIN_EVIDENCE_SIMILARITY;
 
       // 6. Descartar resultados inválidos o poco relevantes.
-      const evidence: EvidenceCitation[] = matches
+      const eligibleMatches = matches
         .filter(
           (match) =>
             Number.isFinite(match.score) &&
             match.score >= minimumSimilarity,
         )
-        .map((match) => ({
-          id: match.id,
-          documentId: match.documentId,
-          ordinal: match.ordinal,
-          content: match.content,
-          similarity: match.score,
-        }));
+        ;
+      const runIdHeader = request.headers["x-sentinelops-run-id"];
+      const runId = typeof runIdHeader === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(runIdHeader)
+        ? runIdHeader : randomUUID();
+      const requestId = randomUUID();
+      const evidenceManifest = buildEvidenceManifest(eligibleMatches, {
+        runId, requestId, projectId: request.params.projectId,
+        incidentId: request.body.incidentId ?? null,
+      });
+      // Audit persistence is mandatory before evidence can be considered verifiable.
+      try { await traceStore.createTrace({ runId, requestId, projectId: request.params.projectId, incidentId: request.body.incidentId ?? null, items: evidenceManifest }); }
+      catch { return reply.code(503).send({ error: "Retrieval audit persistence unavailable" }); }
+      const evidence: EvidenceCitation[] = evidenceManifest.map((item) => ({
+        id: item.evidenceId, alias: item.alias, sourceId: item.sourceId,
+        documentId: item.documentId, ordinal: item.ordinal, content: item.content,
+        similarity: item.score, contentHash: item.contentHash, evidenceScope: item.evidenceScope,
+      }));
 
       // 7. Abstenerse si no hay evidencia suficiente.
       // No se llama al modelo ni se devuelven fragmentos descartados.
@@ -1152,6 +1190,9 @@ export function registerInvestigationRoutes(
             response: renderInvestigationAnalysis(analysis),
             evidence: [],
             analysis,
+            runId,
+            requestId,
+            evidenceManifest,
           },
         });
       }
@@ -1160,7 +1201,7 @@ export function registerInvestigationRoutes(
       // E1, E2, etc. corresponden al orden enviado al orquestador.
       const evidenceForPrompt = evidence.map(
         (item, index) => ({
-          citation: `E${index + 1}`,
+          citation: item.alias,
           chunkId: item.id,
           documentId: item.documentId,
           fragmentOrdinal: item.ordinal,
@@ -1471,6 +1512,9 @@ export function registerInvestigationRoutes(
           response: finalResponse,
           evidence,
           analysis: finalAnalysis,
+          runId,
+          requestId,
+          evidenceManifest,
         },
       });
     },
