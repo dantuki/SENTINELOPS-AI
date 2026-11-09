@@ -40,6 +40,7 @@ const securityTables = [
   "security_audit_events",
   "auth_login_rate_limits",
 ];
+const retrievalTraceTables = ["retrieval_events", "retrieval_event_items"];
 const migrationLockId = "731029482765013";
 
 function getTransactionalSql(sql: string, filename: string): string {
@@ -206,6 +207,16 @@ async function detectMigrationState(
     return existing === 0 && !hasProjectWorkspaceConstraint
       ? "pending"
       : "partial";
+  }
+
+  if (migration.version === "008") {
+    const result = await client.query<{ existing: number }>(
+      `SELECT count(*)::integer AS existing FROM unnest($1::text[]) AS expected(table_name)
+       WHERE to_regclass('public.' || expected.table_name) IS NOT NULL`,
+      [retrievalTraceTables],
+    );
+    const existing = result.rows[0]?.existing ?? 0;
+    return existing === retrievalTraceTables.length ? "applied" : existing === 0 ? "pending" : "partial";
   }
 
   return "pending";

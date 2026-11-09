@@ -1,5 +1,11 @@
 # SentinelOps AI
 
+## Evidence provenance (implemented, pending infrastructure validation)
+
+Investigations persist a Retrieval Trace before chunks are sent to the AI service. A trace binds a server-generated request UUID, a runner correlation UUID, project, requested incident, rank, canonical chunk/document/source lineage, retrieval score, SHA-256 of the exact UTF-8 chunk content, and scope (`incident_specific`, `project_context`, `other_incident`, or `unknown_scope`). `E<n>` is only a stable per-request alias; the canonical evidence identity remains the chunk UUID.
+
+The isolated evaluator must use `RetrievalTraceVerifier` with its temporary PostgreSQL pool to re-read the trace and lineage with parameterized read-only SQL. SHA-256 establishes equality of compared bytes, not authenticity by itself. A trace persistence failure returns an error rather than a response presented as provenance-verifiable. PostgreSQL/Ollama/INC-001 end-to-end validation has not been performed by this change; neither Reliability Gate nor RAG Evaluation Gate is closed.
+
 ### Inteligencia artificial local para la investigación y el diagnóstico de incidentes de software
 
 SentinelOps AI es un proyecto de ingeniería de inteligencia artificial enfocado en investigar y diagnosticar incidentes de software mediante análisis basado en evidencias, aprendizaje automático local, generación aumentada por recuperación (RAG), Model Context Protocol (MCP) y flujos de trabajo agénticos controlados.
