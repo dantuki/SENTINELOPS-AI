@@ -1,10 +1,10 @@
 # SentinelOps AI
 
-## Evidence provenance (implemented, pending infrastructure validation)
+## Procedencia de evidencias (implementada, validación de infraestructura pendiente)
 
-Investigations persist a Retrieval Trace before chunks are sent to the AI service. A trace binds a server-generated request UUID, a runner correlation UUID, project, requested incident, rank, canonical chunk/document/source lineage, retrieval score, SHA-256 of the exact UTF-8 chunk content, and scope (`incident_specific`, `project_context`, `other_incident`, or `unknown_scope`). `E<n>` is only a stable per-request alias; the canonical evidence identity remains the chunk UUID.
+Las investigaciones persisten una traza de recuperación antes de enviar los fragmentos al servicio de IA. La traza vincula el UUID de correlación del runner, el UUID de solicitud de la API, el proyecto, el incidente solicitado, el rango, la relación canónica entre fragmento/documento/fuente, la puntuación de recuperación, el SHA-256 del contenido exacto del fragmento en UTF-8 y su ámbito (`incident_specific`, `project_context`, `other_incident` o `unknown_scope`). `E<n>` es solo un alias por solicitud; la identidad canónica de la evidencia sigue siendo el UUID del fragmento.
 
-The isolated evaluator must use `RetrievalTraceVerifier` with its temporary PostgreSQL pool to re-read the trace and lineage with parameterized read-only SQL. SHA-256 establishes equality of compared bytes, not authenticity by itself. A trace persistence failure returns an error rather than a response presented as provenance-verifiable. PostgreSQL/Ollama/INC-001 end-to-end validation has not been performed by this change; neither Reliability Gate nor RAG Evaluation Gate is closed.
+Antes de la limpieza, el runner aislado vuelve a consultar la traza y sus relaciones mediante el pool PostgreSQL temporal, recalcula las métricas de afirmaciones/evidencias y las citas, y solo informa un PASS global cuando se superan las verificaciones de procedencia, evaluación y limpieza. La validación local pasó el typecheck y el build de la API, además de 132 pruebas de API. El preflight de solo lectura más reciente detectó Ollama y ambos nombres de modelo configurados, pero Docker y la imagen PostgreSQL no estaban disponibles y faltaba el entorno virtual del orquestador. No se ejecutaron migraciones, inferencias ni INC-001; el Reliability Gate y el RAG Evaluation Gate siguen abiertos. Consulta [la arquitectura de procedencia de evidencias](./docs/ARCHITECTURE-EVIDENCE-PROVENANCE.md) y el [plan de pruebas](./docs/TEST-PLAN.md).
 
 ### Inteligencia artificial local para la investigación y el diagnóstico de incidentes de software
 

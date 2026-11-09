@@ -14,6 +14,7 @@ import {
   createContainerName,
   createRunId,
   createTemporaryDatabaseName,
+  finalizeEvaluationOutput,
   getAnonymousPostgresVolumeName,
   missingOllamaModels,
   parseDockerPort,
@@ -27,9 +28,19 @@ import {
   type TemporaryDatabase,
 } from "../scripts/inc001-isolated-lib.js";
 import {
-  evaluateInc001Response,
   type Inc001GroundTruth,
 } from "../src/inc001-evaluation.js";
+import { renderInvestigationAnalysis } from "../src/investigation-analysis.js";
+import {
+  hashChunkContent,
+  type EvidenceManifestItem,
+  PostgresRetrievalTraceStore,
+} from "../src/retrieval-trace.js";
+import {
+  RetrievalTraceVerifier,
+  type RetrievalTraceExpectation,
+} from "../src/retrieval-trace-verifier.js";
+import type { Pool } from "pg";
 import {
   classifyContainerCleanup,
   classifyDockerInspect,
@@ -858,57 +869,285 @@ const evaluationGroundTruth: Inc001GroundTruth = {
   ],
   must_not_claim: [],
 };
-const evaluationEvidence = [
-  {
-    id: "chunk-1",
-    content: [
+const traceRunId = "11111111-1111-4111-8111-111111111111";
+const traceRequestId = "22222222-2222-4222-8222-222222222222";
+const traceProjectId = "33333333-3333-4333-8333-333333333333";
+const traceChunkId = "44444444-4444-4444-8444-444444444444";
+const traceDocumentId = "55555555-5555-4555-8555-555555555555";
+const traceSourceId = "66666666-6666-4666-8666-666666666666";
+const traceRetrievedAt = "2026-01-01T00:00:00.000Z";
+const evaluationContent = [
       '{"request_id":"req-7841","attempts":5,"retry_mode":"parallel"}',
       '{"active_connections":20,"idle_connections":0,"waiting_requests":18}',
       '{"status_code":500,"error":"Timeout acquiring a connection","request_id":"req-7841"}',
       '{"queue_depth":42,"retries_started_last_minute":120}',
       '{"active_connections":20,"waiting_requests":31}',
       '{"service":"payment-gateway","status_code":200,"duration_ms":180}',
-    ].join("\n"),
+].join("\n");
+const completeAnalysis = {
+  summary: "Cinco intentos paralelos comparten req-7841.",
+  summary_evidence_refs: ["E1"],
+  observed_facts: [
+    { claim: "Cinco intentos paralelos comparten req-7841.", evidence_refs: ["E1"] },
+    { claim: "El pool llegó al máximo (20/20), con cero conexiones libres y 18 solicitudes esperando.", evidence_refs: ["E1"] },
+    { claim: "req-7841 agotó el tiempo de espera al adquirir conexión y recibió HTTP 500.", evidence_refs: ["E1"] },
+    { claim: "La cola de reintentos alcanzó 42, con 120 reintentos iniciados por minuto.", evidence_refs: ["E1"] },
+    { claim: "La saturación persistió y llegó a 31 solicitudes pendientes.", evidence_refs: ["E1"] },
+    { claim: "payment-gateway registró HTTP 200 en 180 ms.", evidence_refs: ["E1"] },
+  ],
+  hypotheses: [],
+  missing_information: ["No se ha demostrado una causa raíz."],
+  next_checks: ["Correlacionar eventos con trazas distribuidas."],
+  limitations: ["La evidencia es sintética."],
+};
+const evaluationManifest: EvidenceManifestItem[] = [
+  {
+    evidenceId: traceChunkId,
+    alias: "E1",
+    runId: traceRunId,
+    requestId: traceRequestId,
+    projectId: traceProjectId,
+    incidentId: "INC-001",
+    chunkId: traceChunkId,
+    documentId: traceDocumentId,
+    sourceId: traceSourceId,
+    ordinal: 0,
+    rank: 1,
+    score: 0.8,
+    content: evaluationContent,
+    contentHash: hashChunkContent(evaluationContent),
+    evidenceScope: "incident_specific",
+    retrievedAt: traceRetrievedAt,
   },
 ];
-const completeEvaluationResponse = [
-  "Cinco intentos paralelos comparten req-7841 [E1].",
-  "El pool llegó al máximo (20/20), con cero conexiones libres y 18 solicitudes esperando [E1].",
-  "req-7841 agotó el tiempo de espera al adquirir conexión y recibió HTTP 500 [E1].",
-  "La cola de reintentos alcanzó 42, con 120 reintentos iniciados por minuto [E1].",
-  "La saturación persistió y llegó a 31 solicitudes pendientes [E1].",
-  "payment-gateway registró HTTP 200 en 180 ms [E1].",
-].join(" ");
+const verifiedTrace = {
+  status: "verified" as const,
+  verifiedCount: 1,
+  unverifiedCount: 0,
+  failedCount: 0,
+  verificationErrors: [],
+  verifiedEvidenceIds: [traceChunkId],
+  requestId: traceRequestId,
+  runId: traceRunId,
+  evidence: [{ evidenceId: traceChunkId, status: "verified" as const }],
+};
 
-function validEvaluationReport(): Record<string, unknown> {
-  const evaluation = evaluateInc001Response(
-    completeEvaluationResponse,
-    evaluationEvidence,
-    evaluationGroundTruth,
-  );
+function createVerifierPool(
+  rows: Record<string, unknown>[],
+): Pick<Pool, "query"> {
   return {
+    query: async () => ({
+      rows,
+      command: "SELECT",
+      rowCount: rows.length,
+      oid: 0,
+      fields: [],
+    }),
+  } as unknown as Pick<Pool, "query">;
+}
+
+function storedTraceRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const item = evaluationManifest[0]!;
+  return {
+    runId: traceRunId,
+    requestId: traceRequestId,
+    projectId: traceProjectId,
+    incidentId: "INC-001",
+    retrievedAt: new Date(traceRetrievedAt),
+    rank: 1,
+    chunkId: traceChunkId,
+    documentId: traceDocumentId,
+    sourceId: traceSourceId,
+    projectItemId: traceProjectId,
+    ordinal: 0,
+    score: 0.8,
+    contentHash: item.contentHash,
+    evidenceScope: "incident_specific",
+    itemRetrievedAt: new Date(traceRetrievedAt),
+    content: evaluationContent,
+    metadata: { incidentId: "INC-001" },
+    documentSourceId: traceSourceId,
+    documentStatus: "indexed",
+    sourceStatus: "active",
+    ...overrides,
+  };
+}
+
+const traceExpectation: RetrievalTraceExpectation = {
+  runId: traceRunId,
+  requestId: traceRequestId,
+  projectId: traceProjectId,
+  incidentId: "INC-001",
+  retrievedAt: traceRetrievedAt,
+  manifest: evaluationManifest,
+};
+
+test("PostgreSQL retrieval trace storage commits atomically and rolls back on item failure", async () => {
+  const statements: string[] = [];
+  let released = false;
+  const client = {
+    query: async (statement: string) => {
+      statements.push(statement.trim());
+      return { rows: [], rowCount: 1 };
+    },
+    release: () => {
+      released = true;
+    },
+  };
+  const pool = {
+    connect: async () => client,
+  } as unknown as Pool;
+  const store = new PostgresRetrievalTraceStore(pool);
+
+  await store.createTrace({
+    runId: traceRunId,
+    requestId: traceRequestId,
+    projectId: traceProjectId,
+    incidentId: "INC-001",
+    retrievedAt: traceRetrievedAt,
+    items: evaluationManifest,
+  });
+  assert.deepEqual(statements.map((statement) => statement.split(/\s+/u)[0]), [
+    "BEGIN",
+    "INSERT",
+    "INSERT",
+    "COMMIT",
+  ]);
+  assert.equal(released, true);
+
+  statements.length = 0;
+  released = false;
+  const failingClient = {
+    ...client,
+    query: async (statement: string) => {
+      statements.push(statement.trim());
+      if (statement.includes("INSERT INTO retrieval_event_items")) {
+        throw new Error("forced trace insert failure");
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  const failingStore = new PostgresRetrievalTraceStore({
+    connect: async () => failingClient,
+  } as unknown as Pool);
+  await assert.rejects(
+    failingStore.createTrace({
+      runId: traceRunId,
+      requestId: traceRequestId,
+      projectId: traceProjectId,
+      incidentId: "INC-001",
+      retrievedAt: traceRetrievedAt,
+      items: evaluationManifest,
+    }),
+    /forced trace insert failure/u,
+  );
+  assert.ok(statements.some((statement) => statement === "ROLLBACK"));
+  assert.equal(released, true);
+});
+
+test("retrieval trace verifier confirms stored lineage, scope, content and same-run identity", async () => {
+  const verified = await new RetrievalTraceVerifier(
+    createVerifierPool([storedTraceRow()]),
+  ).verifyTrace(traceExpectation);
+
+  assert.equal(verified.status, "verified");
+  assert.deepEqual(verified.verifiedEvidenceIds, [traceChunkId]);
+
+  const contentMismatch = await new RetrievalTraceVerifier(
+    createVerifierPool([
+      storedTraceRow({ content: "mutated stored content" }),
+    ]),
+  ).verifyTrace(traceExpectation);
+  assert.equal(contentMismatch.status, "failed");
+  assert.ok(
+    contentMismatch.verificationErrors.some((error) =>
+      error.includes("content_or_hash_mismatch"),
+    ),
+  );
+
+  const scopeMismatch = await new RetrievalTraceVerifier(
+    createVerifierPool([
+      storedTraceRow({ metadata: { incidentId: "INC-002" } }),
+    ]),
+  ).verifyTrace(traceExpectation);
+  assert.equal(scopeMismatch.status, "failed");
+  assert.ok(
+    scopeMismatch.verificationErrors.some((error) =>
+      error.includes("scope_mismatch"),
+    ),
+  );
+
+  const sourceLineageMismatch = await new RetrievalTraceVerifier(
+    createVerifierPool([
+      storedTraceRow({
+        documentSourceId: "77777777-7777-4777-8777-777777777777",
+      }),
+    ]),
+  ).verifyTrace(traceExpectation);
+  assert.equal(sourceLineageMismatch.status, "failed");
+  assert.ok(
+    sourceLineageMismatch.verificationErrors.some((error) =>
+      error.includes("lineage_or_order_mismatch"),
+    ),
+  );
+
+  const runMismatch = await new RetrievalTraceVerifier(
+    createVerifierPool([
+      storedTraceRow({ runId: "77777777-7777-4777-8777-777777777777" }),
+    ]),
+  ).verifyTrace(traceExpectation);
+  assert.equal(runMismatch.status, "failed");
+  assert.ok(
+    runMismatch.verificationErrors.includes(
+      "retrieval_event_header_mismatch",
+    ),
+  );
+});
+
+function candidateEvaluationReport(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const candidate = {
+    reportType: "inc001-candidate-v1",
     dataset: "sentinelops-synthetic-demo-v1",
     incidentId: "INC-001",
     model: "qwen3.5:4b",
-    evidenceCount: evaluationEvidence.length,
-    evidence: evaluationEvidence,
-    response: completeEvaluationResponse,
+    evidenceCount: evaluationManifest.length,
+    runId: traceRunId,
+    requestId: traceRequestId,
+    retrievedAt: traceRetrievedAt,
+    evidenceManifest: evaluationManifest,
+    response: renderInvestigationAnalysis(completeAnalysis),
+    analysis: completeAnalysis,
     ingestion: "completed",
     timings: { warmupMs: 10, ingestionMs: 20, investigationMs: 30 },
     abstained: false,
     referenceLeaked: false,
-    evaluation,
-    passed: true,
+    ...overrides,
   };
+  return candidate;
+}
+
+function validEvaluationReport(
+  candidate: Record<string, unknown> = candidateEvaluationReport(),
+  verification = verifiedTrace,
+): Record<string, unknown> {
+  return JSON.parse(
+    finalizeEvaluationOutput(
+      JSON.stringify(candidate),
+      evaluationGroundTruth,
+      traceRunId,
+      verification,
+    ),
+  ) as Record<string, unknown>;
 }
 
 function summarizedReport(
   report: Record<string, unknown> = validEvaluationReport(),
 ) {
-  return summarizeEvaluationOutput(
-    JSON.stringify(report),
-    evaluationGroundTruth,
-  );
+  return summarizeEvaluationOutput(JSON.stringify(report), evaluationGroundTruth);
 }
 
 test("evaluation report validation rejects empty, truncated, partial and malformed output", () => {
@@ -917,81 +1156,100 @@ test("evaluation report validation rejects empty, truncated, partial and malform
     "{",
     "not json",
     JSON.stringify({ passed: true, model: "m", timings: { warmupMs: 1 } }),
+    JSON.stringify(candidateEvaluationReport()),
   ]) {
     const summary = summarizeEvaluationOutput(output, evaluationGroundTruth);
     assert.equal(summary.parsed, false);
     assert.equal(summary.passed, null);
     assert.deepEqual(summary.validationErrors, [
-      "invalid or incomplete evaluation report",
+      "invalid or incomplete verified evaluation report",
     ]);
   }
 });
 
-test("evaluation report recomputes coverage from the response and captured evidence", () => {
-  const fabricated = validEvaluationReport();
-  fabricated.response = "A generic statement with one valid citation [E1].";
-
-  const summary = summarizedReport(fabricated);
-  assert.equal(summary.parsed, false);
-  assert.equal(summary.passed, null);
-  assert.notEqual(
-    resolveEvaluationResult(summary, 0, true, null, null).exitCode,
+test("runner recomputes claim coverage and evidence leakage from the verified manifest", () => {
+  const genericAnalysis = {
+    ...completeAnalysis,
+    summary: "El sistema presenta varios eventos.",
+    observed_facts: completeAnalysis.observed_facts.map((fact) => ({
+      ...fact,
+      claim: "El sistema presenta varios eventos.",
+    })),
+  };
+  const generic = validEvaluationReport(
+    candidateEvaluationReport({
+      response: renderInvestigationAnalysis(genericAnalysis),
+      analysis: genericAnalysis,
+    }),
+  );
+  assert.equal(summarizedReport(generic).parsed, true);
+  assert.equal(generic.passed, false);
+  assert.equal(
+    (generic.evaluation as Record<string, unknown>).answerCoverage,
     0,
   );
 
-  const unsupportedEvidence = validEvaluationReport();
-  unsupportedEvidence.evidence = [
-    { id: "unrelated-chunk", content: "No INC-001 observations are present." },
-  ];
-  const unsupportedSummary = summarizedReport(unsupportedEvidence);
-  assert.equal(unsupportedSummary.parsed, false);
-  assert.notEqual(
-    resolveEvaluationResult(unsupportedSummary, 0, true, null, null).exitCode,
+  const unrelatedManifest = evaluationManifest.map((item) => ({
+    ...item,
+    content: "No INC-001 observations are present.",
+    contentHash: hashChunkContent("No INC-001 observations are present."),
+  }));
+  const unrelated = validEvaluationReport(
+    candidateEvaluationReport({ evidenceManifest: unrelatedManifest }),
+  );
+  assert.equal(summarizedReport(unrelated).parsed, true);
+  assert.equal(unrelated.passed, false);
+  assert.equal(
+    (unrelated.evaluation as Record<string, unknown>).retrievalRecall,
     0,
   );
 
-  const leakedReference = validEvaluationReport();
-  leakedReference.evidence = [
-    {
-      id: "reference-chunk",
-      content: `${evaluationEvidence[0]!.content}\nsynthetic_evaluation_reference`,
-    },
-  ];
-  const leakedSummary = summarizedReport(leakedReference);
-  assert.equal(leakedSummary.parsed, false);
-  assert.notEqual(
-    resolveEvaluationResult(leakedSummary, 0, true, null, null).exitCode,
-    0,
+  const leakedManifest = evaluationManifest.map((item) => ({
+    ...item,
+    content: `${item.content}\nsynthetic_evaluation_reference`,
+    contentHash: hashChunkContent(`${item.content}\nsynthetic_evaluation_reference`),
+  }));
+  const leaked = validEvaluationReport(
+    candidateEvaluationReport({
+      evidenceManifest: leakedManifest,
+      referenceLeaked: true,
+    }),
   );
+  assert.equal(summarizedReport(leaked).parsed, true);
+  assert.equal(leaked.passed, false);
+  assert.equal(leaked.referenceLeaked, true);
 });
 
-test("evaluation report validation checks the full contract and metric coherence", () => {
-  const valid = summarizedReport();
-  assert.equal(valid.parsed, true);
-  assert.equal(valid.passed, true);
-  assert.deepEqual(valid.validationErrors, []);
+test("verified report integrity rejects altered output and requires a verified trace", () => {
+  const valid = validEvaluationReport();
+  assert.equal(summarizedReport(valid).parsed, true);
+  assert.equal(
+    summarizedReport(valid).passed,
+    true,
+    JSON.stringify(valid.evaluation),
+  );
 
-  const malformed = validEvaluationReport();
-  malformed.extra = "not part of evaluator output";
-  assert.equal(summarizedReport(malformed).parsed, false);
+  const alteredMetrics = validEvaluationReport();
+  (alteredMetrics.evaluation as Record<string, unknown>).retrievalRecall = 0.5;
+  assert.equal(summarizedReport(alteredMetrics).parsed, false);
 
-  const incoherent = validEvaluationReport();
-  const evaluation = incoherent.evaluation as Record<string, unknown>;
-  evaluation.retrievalRecall = 0.5;
-  assert.equal(summarizedReport(incoherent).parsed, false);
+  const alteredCitation = validEvaluationReport();
+  const evaluation = alteredCitation.evaluation as Record<string, unknown>;
+  (evaluation.citations as Record<string, unknown>).invalid = ["[E2]"];
+  assert.equal(summarizedReport(alteredCitation).parsed, false);
 
-  const contradictory = validEvaluationReport();
-  contradictory.passed = false;
-  assert.equal(summarizedReport(contradictory).parsed, false);
-
-  const incorrectCitations = validEvaluationReport();
-  const incorrectEvaluation = incorrectCitations.evaluation as Record<
-    string,
-    unknown
-  >;
-  const citations = incorrectEvaluation.citations as Record<string, unknown>;
-  citations.count = 2;
-  assert.equal(summarizedReport(incorrectCitations).parsed, false);
+  const failedTrace = {
+    ...verifiedTrace,
+    status: "failed" as const,
+    verifiedCount: 0,
+    failedCount: 1,
+    verificationErrors: ["content_or_hash_mismatch"],
+    verifiedEvidenceIds: [],
+    evidence: [{ evidenceId: traceChunkId, status: "failed" as const }],
+  };
+  const failed = validEvaluationReport(candidateEvaluationReport(), failedTrace);
+  assert.equal(summarizedReport(failed).parsed, true);
+  assert.equal(failed.passed, false);
 });
 
 test("a valid passing report and successful evaluator and cleanup are jointly required for PASS", () => {
@@ -1010,29 +1268,20 @@ test("a valid passing report and successful evaluator and cleanup are jointly re
     exitCode: 0,
   });
 });
-
 test("a valid quality failure is nonzero and an invalid result can never pass", () => {
-  const failedReport = validEvaluationReport();
-  const partialEvidence = [
-    {
-      id: "partial-chunk",
-      content: evaluationEvidence[0]!.content
-        .split("\n")
-        .slice(0, 5)
-        .join("\n"),
-    },
-  ];
-  failedReport.evidenceCount = partialEvidence.length;
-  failedReport.evidence = partialEvidence;
-  failedReport.response = completeEvaluationResponse
-    .split(" payment-gateway registró")
-    .at(0);
-  failedReport.evaluation = evaluateInc001Response(
-    String(failedReport.response),
-    partialEvidence,
-    evaluationGroundTruth,
+  const unsupported = {
+    ...completeAnalysis,
+    observed_facts: completeAnalysis.observed_facts.map((fact) => ({
+      ...fact,
+      claim: "El sistema presenta varios eventos.",
+    })),
+  };
+  const failedReport = validEvaluationReport(
+    candidateEvaluationReport({
+      response: renderInvestigationAnalysis(unsupported),
+      analysis: unsupported,
+    }),
   );
-  failedReport.passed = false;
   const qualityFailure = resolveEvaluationResult(
     summarizedReport(failedReport),
     1,

@@ -442,6 +442,20 @@ La cobertura ejecutada es unitaria, de contratos y de tipos. No verifica el nuev
 El reporte INC-001 incluye las evidencias recuperadas junto con la respuesta; el runner vuelve a calcular desde esos datos las observaciones, citas, factualidad, abstención y filtración de referencia, y exige que coincidan con las métricas reportadas. Esto cierra la ruta de falsa aprobación reproducida con una respuesta genérica, pero la evaluación sigue siendo determinista y no demuestra por sí sola la calidad semántica general ni la procedencia real del contenido de una respuesta del modelo.
 
 Los tests de interrupción, Windows y Docker usan emisores/adaptadores simulados. No demuestran la terminación de árboles de procesos en Windows real, el comportamiento de Docker Desktop, la eliminación efectiva de un contenedor/volumen ni el resultado de PostgreSQL integrado. El contenedor histórico `sentinelops-inc001-eval-025ea47223dd3ae9`, el volumen histórico identificado en la auditoría y la base PostgreSQL habitual no se inspeccionaron ni modificaron; esta validación no ejecutó comandos Docker ni SQL.
-# Retrieval trace test plan
+# Plan de pruebas de la traza de recuperación
 
-Unit/adaptor tests must cover same-run/request rejection, absent trace, mixed projects, document/source lineage mismatch, non-indexed document, inactive source, content substitution/hash mismatch, other-incident scope, project context used as direct evidence, irrelevant citations, unsupported/contradicted claims, and fabricated metrics. Mock/adaptor coverage does not validate a real PostgreSQL temporary database, Ollama inference, or INC-001 evaluation.
+La cobertura unitaria/de adaptadores incluye inserción atómica de trazas y rollback, discrepancias en la cabecera de una misma ejecución, discrepancias de lineage documento/fuente, ámbitos incompatibles, sustitución de contenido/discrepancias de hash, cobertura de respuestas genéricas, evidencias no relacionadas, marcadores de referencia filtrados, métricas de reporte alteradas y bloqueo de PASS cuando falla la verificación de la traza. Son pruebas simuladas o deterministas; no demuestran el comportamiento de una base de datos real.
+
+### Validación local más reciente
+
+| Comprobación | Resultado |
+|---|---|
+| `npm.cmd run typecheck --workspace=@sentinelops/api` | Aprobado (exit 0) |
+| `npm.cmd test --workspace=@sentinelops/api` | 132 aprobadas, 0 fallidas |
+| `npm.cmd run build --workspace=@sentinelops/api` | Aprobado (exit 0) |
+| `git diff --check` | Aprobado |
+| Preflight de solo lectura de INC-001 | Bloqueado de forma segura: daemon Docker e imagen PostgreSQL local no disponibles; falta `services/ai-orchestrator/.venv` |
+| Preflight de Ollama | Disponible; se listaron `qwen3.5:4b` y `qwen3-embedding:0.6b`; no se ejecutaron inferencias |
+| `test:postgres`, migraciones 001–008, runner aislado y evaluación INC-001 | No ejecutados |
+
+La migración 008 y el runner de integración PostgreSQL incluyen ahora las tablas de trazas de recuperación, pero en esta validación no se aplicó ni ejercitó la migración. Aún requieren pruebas los casos de traza ausente, lineage entre proyectos distintos, documento no indexado, fuente inactiva, rechazo de evidencias de otros incidentes/ámbito de contexto del proyecto y relevancia adversarial de citas. Antes de aprobar el Reliability Gate siguen siendo obligatorios una ejecución de migraciones e integración en PostgreSQL temporal, una inferencia de Ollama, la evaluación INC-001 aislada y la verificación de limpieza. En esta validación no se accedió a la base PostgreSQL habitual ni a su volumen.

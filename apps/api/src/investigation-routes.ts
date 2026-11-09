@@ -8,10 +8,18 @@ import type {
 import { detectFactualityViolations } from "./inc001-evaluation.js";
 import {
   buildEvidenceManifest,
+  isUuid,
   MemoryRetrievalTraceStore,
   type EvidenceManifestItem,
   type RetrievalTraceStore,
 } from "./retrieval-trace.js";
+import {
+  renderInvestigationAnalysis,
+  type HypothesisStatus,
+  type InvestigationAnalysis,
+  type InvestigationHypothesis,
+  type ObservedFact,
+} from "./investigation-analysis.js";
 
 const EMBEDDING_DIMENSIONS = 1024;
 const MAX_TEXT_CHARS = 20_000;
@@ -45,17 +53,7 @@ interface InvestigationRequest {
   incidentId?: string;
 }
 
-interface EvidenceCitation {
-  id: string;
-  alias: string;
-  sourceId: string;
-  documentId: string;
-  ordinal: number;
-  content: string;
-  similarity: number;
-  contentHash: string;
-  evidenceScope: "incident_specific" | "project_context" | "other_incident" | "unknown_scope";
-}
+type EvidenceCitation = EvidenceManifestItem;
 
 interface InvestigationResponse {
   data: {
@@ -64,37 +62,10 @@ interface InvestigationResponse {
     evidence: EvidenceCitation[];
     runId: string;
     requestId: string;
+    retrievedAt: string;
     evidenceManifest: EvidenceManifestItem[];
     analysis: InvestigationAnalysis;
   };
-}
-
-type HypothesisStatus =
-  | "supported_unconfirmed"
-  | "unverified"
-  | "contradicted"
-  | "insufficient_evidence";
-
-interface ObservedFact {
-  claim: string;
-  evidence_refs: string[];
-}
-
-interface InvestigationHypothesis {
-  statement: string;
-  status: HypothesisStatus;
-  supporting_evidence: string[];
-  contradicting_evidence: string[];
-}
-
-interface InvestigationAnalysis {
-  summary: string;
-  summary_evidence_refs: string[];
-  observed_facts: ObservedFact[];
-  hypotheses: InvestigationHypothesis[];
-  missing_information: string[];
-  next_checks: string[];
-  limitations: string[];
 }
 
 interface ApiError {
@@ -131,27 +102,24 @@ const uuidSchema = {
 const evidenceSchema = {
   type: "object",
   properties: {
-    id: uuidSchema,
+    evidenceId: uuidSchema,
     alias: { type: "string", pattern: "^E[1-9][0-9]*$" },
+    runId: uuidSchema,
+    requestId: uuidSchema,
+    projectId: uuidSchema,
+    incidentId: { anyOf: [{ type: "string" }, { type: "null" }] },
+    chunkId: uuidSchema,
     sourceId: uuidSchema,
     documentId: uuidSchema,
     ordinal: { type: "integer", minimum: 0 },
+    rank: { type: "integer", minimum: 1 },
     content: { type: "string" },
-    similarity: { type: "number" },
+    score: { type: "number" },
     contentHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
     evidenceScope: { type: "string", enum: ["incident_specific", "project_context", "other_incident", "unknown_scope"] },
+    retrievedAt: { type: "string", format: "date-time" },
   },
-  required: [
-    "id",
-    "alias",
-    "sourceId",
-    "documentId",
-    "ordinal",
-    "content",
-    "similarity",
-    "contentHash",
-    "evidenceScope",
-  ],
+  required: ["evidenceId", "alias", "runId", "requestId", "projectId", "incidentId", "chunkId", "sourceId", "documentId", "ordinal", "rank", "content", "score", "contentHash", "evidenceScope", "retrievedAt"],
   additionalProperties: false,
 } as const;
 
@@ -267,9 +235,13 @@ const investigationResponseSchema = {
         analysis: analysisSchema,
         runId: uuidSchema,
         requestId: uuidSchema,
-        evidenceManifest: { type: "array" },
+        retrievedAt: { type: "string", format: "date-time" },
+        evidenceManifest: {
+          type: "array",
+          items: evidenceSchema,
+        },
       },
-      required: ["model", "response", "evidence", "analysis", "runId", "requestId", "evidenceManifest"],
+      required: ["model", "response", "evidence", "analysis", "runId", "requestId", "retrievedAt", "evidenceManifest"],
       additionalProperties: false,
     },
   },
@@ -468,43 +440,6 @@ function parseInvestigationAnalysis(
     next_checks: nextChecks,
     limitations,
   };
-}
-
-function renderInvestigationAnalysis(
-  analysis: InvestigationAnalysis,
-): string {
-  const formatReferences = (references: string[]) =>
-    references.length > 0 ? ` ${references.map((ref) => `[${ref}]`).join(" ")}` : "";
-  const section = (heading: string, lines: string[]) =>
-    `${heading}:\n${lines.length > 0 ? lines.map((line) => `- ${line}`).join("\n") : "- No identificado."}`;
-  const hypothesisStatus: Record<HypothesisStatus, string> = {
-    supported_unconfirmed: "Respaldada, no confirmada",
-    unverified: "No verificada",
-    contradicted: "Contradicha",
-    insufficient_evidence: "Evidencia insuficiente",
-  };
-  return [
-    `Resumen: ${analysis.summary}${formatReferences(analysis.summary_evidence_refs)}`,
-    section(
-      "Hechos respaldados por evidencia",
-      analysis.observed_facts.map(
-        (fact) => `${fact.claim}${formatReferences(fact.evidence_refs)}`,
-      ),
-    ),
-    section(
-      "Hipótesis pendientes de confirmar",
-      analysis.hypotheses.map(
-        (hypothesis) =>
-          `${hypothesisStatus[hypothesis.status]}: ${hypothesis.statement}${formatReferences([
-            ...hypothesis.supporting_evidence,
-            ...hypothesis.contradicting_evidence,
-          ])}`,
-      ),
-    ),
-    section("Información faltante", analysis.missing_information),
-    section("Próximas comprobaciones recomendadas", analysis.next_checks),
-    section("Limitaciones", analysis.limitations),
-  ].join("\n\n");
 }
 
 function parseModelAnalysis(
@@ -1138,24 +1073,45 @@ export function registerInvestigationRoutes(
           (match) =>
             Number.isFinite(match.score) &&
             match.score >= minimumSimilarity,
-        )
-        ;
+        );
       const runIdHeader = request.headers["x-sentinelops-run-id"];
-      const runId = typeof runIdHeader === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(runIdHeader)
-        ? runIdHeader : randomUUID();
+      if (runIdHeader !== undefined && !isUuid(runIdHeader)) {
+        return reply.code(400).send({ error: "Invalid evaluation run ID" });
+      }
+      const runId =
+        typeof runIdHeader === "string" ? runIdHeader : randomUUID();
       const requestId = randomUUID();
-      const evidenceManifest = buildEvidenceManifest(eligibleMatches, {
-        runId, requestId, projectId: request.params.projectId,
-        incidentId: request.body.incidentId ?? null,
-      });
+      const retrievedAt = new Date().toISOString();
+      let evidenceManifest: EvidenceManifestItem[];
+      try {
+        evidenceManifest = buildEvidenceManifest(eligibleMatches, {
+          runId,
+          requestId,
+          projectId: request.params.projectId,
+          incidentId: request.body.incidentId ?? null,
+        }, new Date(retrievedAt));
+      } catch {
+        request.log.warn(
+          { stage: "retrieval" },
+          "Investigation retrieval contained unverifiable evidence identity",
+        );
+        return reply.code(502).send({
+          error: "Retrieved evidence could not be verified",
+        });
+      }
       // Audit persistence is mandatory before evidence can be considered verifiable.
-      try { await traceStore.createTrace({ runId, requestId, projectId: request.params.projectId, incidentId: request.body.incidentId ?? null, items: evidenceManifest }); }
+      try {
+        await traceStore.createTrace({
+          runId,
+          requestId,
+          projectId: request.params.projectId,
+          incidentId: request.body.incidentId ?? null,
+          retrievedAt,
+          items: evidenceManifest,
+        });
+      }
       catch { return reply.code(503).send({ error: "Retrieval audit persistence unavailable" }); }
-      const evidence: EvidenceCitation[] = evidenceManifest.map((item) => ({
-        id: item.evidenceId, alias: item.alias, sourceId: item.sourceId,
-        documentId: item.documentId, ordinal: item.ordinal, content: item.content,
-        similarity: item.score, contentHash: item.contentHash, evidenceScope: item.evidenceScope,
-      }));
+      const evidence: EvidenceCitation[] = evidenceManifest;
 
       // 7. Abstenerse si no hay evidencia suficiente.
       // No se llama al modelo ni se devuelven fragmentos descartados.
@@ -1192,6 +1148,7 @@ export function registerInvestigationRoutes(
             analysis,
             runId,
             requestId,
+            retrievedAt,
             evidenceManifest,
           },
         });
@@ -1200,9 +1157,9 @@ export function registerInvestigationRoutes(
       // 8. Preparar las evidencias que recibirá el modelo.
       // E1, E2, etc. corresponden al orden enviado al orquestador.
       const evidenceForPrompt = evidence.map(
-        (item, index) => ({
+        (item) => ({
           citation: item.alias,
-          chunkId: item.id,
+          chunkId: item.chunkId,
           documentId: item.documentId,
           fragmentOrdinal: item.ordinal,
           content: item.content,
@@ -1514,6 +1471,7 @@ export function registerInvestigationRoutes(
           analysis: finalAnalysis,
           runId,
           requestId,
+          retrievedAt,
           evidenceManifest,
         },
       });

@@ -41,7 +41,7 @@ export interface SemanticSearchChunkRecord {
   id: string;
   projectId: string;
   documentId: string;
-  sourceId?: string;
+  sourceId: string;
   ordinal: number;
   content: string;
   score: number;

@@ -1,12 +1,23 @@
 import { randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { TerminationReason } from "./inc001-runner-lifecycle.js";
 import {
   containsEvaluationReference,
-  evaluateInc001Response,
-  isInc001EvaluationAccepted,
+  evaluateInc001VerifiedClaims,
+  isInc001VerifiedEvaluationAccepted,
   type Inc001Evidence,
   type Inc001GroundTruth,
 } from "../src/inc001-evaluation.js";
+import {
+  renderInvestigationAnalysis,
+  type InvestigationAnalysis,
+} from "../src/investigation-analysis.js";
+import {
+  hashChunkContent,
+  isUuid,
+  type EvidenceManifestItem,
+} from "../src/retrieval-trace.js";
+import type { TraceVerificationReport } from "../src/retrieval-trace-verifier.js";
 
 export const POSTGRES_IMAGE = "pgvector/pgvector:0.8.7-pg18-trixie";
 export const HABITUAL_POSTGRES_PORT = 5432;
@@ -380,20 +391,31 @@ export interface EvaluationOutcome {
   validationErrors: string[];
 }
 
-const EVALUATION_REPORT_KEYS = new Set([
+const CANDIDATE_KEYS = [
+  "reportType",
   "dataset",
   "incidentId",
   "model",
   "evidenceCount",
-  "evidence",
+  "runId",
+  "requestId",
+  "retrievedAt",
+  "evidenceManifest",
   "response",
+  "analysis",
   "ingestion",
   "timings",
   "abstained",
   "referenceLeaked",
+] as const;
+
+const VERIFIED_REPORT_KEYS = [
+  ...CANDIDATE_KEYS.filter((key) => key !== "reportType"),
+  "reportType",
+  "traceVerification",
   "evaluation",
   "passed",
-]);
+] as const;
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -401,20 +423,6 @@ function isNonNegativeFiniteNumber(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isUniqueKnownObservationIds(
-  value: unknown,
-  groundTruth: Inc001GroundTruth,
-): value is string[] {
-  const expectedIds = new Set(
-    groundTruth.expected_observations.map(({ id }) => id),
-  );
-  return (
-    isStringArray(value) &&
-    value.every((id) => expectedIds.has(id)) &&
-    new Set(value).size === value.length
-  );
 }
 
 function hasExactKeys(
@@ -428,40 +436,226 @@ function hasExactKeys(
   );
 }
 
-function isInc001EvaluationReport(
-  value: unknown,
-  groundTruth: Inc001GroundTruth,
-): value is Record<string, unknown> {
-  if (!isRecord(value)) {
-    return false;
+interface EvaluationCandidate {
+  dataset: string;
+  incidentId: "INC-001";
+  model: string;
+  evidenceCount: number;
+  runId: string;
+  requestId: string;
+  retrievedAt: string;
+  evidenceManifest: EvidenceManifestItem[];
+  response: string;
+  analysis: InvestigationAnalysis;
+  ingestion: "skipped" | "completed";
+  timings: {
+    warmupMs: number;
+    ingestionMs: number | null;
+    investigationMs: number;
+  };
+}
+
+function parseEvaluationAnalysis(value: unknown): InvestigationAnalysis | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "summary",
+      "summary_evidence_refs",
+      "observed_facts",
+      "hypotheses",
+      "missing_information",
+      "next_checks",
+      "limitations",
+    ]) ||
+    typeof value.summary !== "string" ||
+    !value.summary.trim() ||
+    !isStringArray(value.summary_evidence_refs) ||
+    !Array.isArray(value.observed_facts) ||
+    !Array.isArray(value.hypotheses) ||
+    !isStringArray(value.missing_information) ||
+    !isStringArray(value.next_checks) ||
+    !isStringArray(value.limitations)
+  ) {
+    return null;
   }
 
+  const observedFacts: InvestigationAnalysis["observed_facts"] = [];
+  for (const fact of value.observed_facts) {
+    if (
+      !isRecord(fact) ||
+      !hasExactKeys(fact, ["claim", "evidence_refs"]) ||
+      typeof fact.claim !== "string" ||
+      !fact.claim.trim() ||
+      !isStringArray(fact.evidence_refs)
+    ) {
+      return null;
+    }
+    observedFacts.push({
+      claim: fact.claim,
+      evidence_refs: fact.evidence_refs,
+    });
+  }
+
+  const statuses = new Set([
+    "supported_unconfirmed",
+    "unverified",
+    "contradicted",
+    "insufficient_evidence",
+  ]);
+  const hypotheses: InvestigationAnalysis["hypotheses"] = [];
+  for (const hypothesis of value.hypotheses) {
+    if (
+      !isRecord(hypothesis) ||
+      !hasExactKeys(hypothesis, [
+        "statement",
+        "status",
+        "supporting_evidence",
+        "contradicting_evidence",
+      ]) ||
+      typeof hypothesis.statement !== "string" ||
+      !hypothesis.statement.trim() ||
+      typeof hypothesis.status !== "string" ||
+      !statuses.has(hypothesis.status) ||
+      !isStringArray(hypothesis.supporting_evidence) ||
+      !isStringArray(hypothesis.contradicting_evidence)
+    ) {
+      return null;
+    }
+    hypotheses.push({
+      statement: hypothesis.statement,
+      status:
+        hypothesis.status as InvestigationAnalysis["hypotheses"][number]["status"],
+      supporting_evidence: hypothesis.supporting_evidence,
+      contradicting_evidence: hypothesis.contradicting_evidence,
+    });
+  }
+
+  return {
+    summary: value.summary,
+    summary_evidence_refs: value.summary_evidence_refs,
+    observed_facts: observedFacts,
+    hypotheses,
+    missing_information: value.missing_information,
+    next_checks: value.next_checks,
+    limitations: value.limitations,
+  };
+}
+
+function parseManifest(
+  value: unknown,
+  runId: string,
+  requestId: string,
+): EvidenceManifestItem[] | null {
+  if (!Array.isArray(value) || value.length > 5) {
+    return null;
+  }
+  const manifest: EvidenceManifestItem[] = [];
+  const seenChunkIds = new Set<string>();
+  const scopes = new Set([
+    "incident_specific",
+    "project_context",
+    "other_incident",
+    "unknown_scope",
+  ]);
+  for (const [index, raw] of value.entries()) {
+    if (
+      !isRecord(raw) ||
+      !hasExactKeys(raw, [
+        "alias",
+        "chunkId",
+        "content",
+        "contentHash",
+        "documentId",
+        "evidenceId",
+        "evidenceScope",
+        "incidentId",
+        "ordinal",
+        "projectId",
+        "rank",
+        "requestId",
+        "retrievedAt",
+        "runId",
+        "score",
+        "sourceId",
+      ]) ||
+      !isUuid(raw.evidenceId) ||
+      raw.evidenceId !== raw.chunkId ||
+      !isUuid(raw.chunkId) ||
+      !isUuid(raw.documentId) ||
+      !isUuid(raw.sourceId) ||
+      !isUuid(raw.projectId) ||
+      raw.runId !== runId ||
+      raw.requestId !== requestId ||
+      raw.incidentId !== "INC-001" ||
+      raw.alias !== `E${index + 1}` ||
+      raw.rank !== index + 1 ||
+      !Number.isInteger(raw.ordinal) ||
+      Number(raw.ordinal) < 0 ||
+      typeof raw.score !== "number" ||
+      !Number.isFinite(raw.score) ||
+      typeof raw.content !== "string" ||
+      raw.content.length === 0 ||
+      raw.contentHash !== hashChunkContent(raw.content) ||
+      typeof raw.evidenceScope !== "string" ||
+      !scopes.has(raw.evidenceScope) ||
+      typeof raw.retrievedAt !== "string" ||
+      Number.isNaN(Date.parse(raw.retrievedAt)) ||
+      new Date(raw.retrievedAt).toISOString() !== raw.retrievedAt ||
+      seenChunkIds.has(raw.chunkId)
+    ) {
+      return null;
+    }
+    seenChunkIds.add(raw.chunkId);
+    manifest.push({
+      evidenceId: raw.evidenceId,
+      alias: raw.alias,
+      runId: raw.runId,
+      requestId: raw.requestId,
+      projectId: raw.projectId,
+      incidentId: raw.incidentId,
+      chunkId: raw.chunkId,
+      documentId: raw.documentId,
+      sourceId: raw.sourceId,
+      ordinal: Number(raw.ordinal),
+      rank: Number(raw.rank),
+      score: raw.score,
+      content: raw.content,
+      contentHash: raw.contentHash,
+      evidenceScope: raw.evidenceScope as EvidenceManifestItem["evidenceScope"],
+      retrievedAt: raw.retrievedAt,
+    });
+  }
+  return manifest;
+}
+
+function parseCandidate(
+  value: unknown,
+  groundTruth: Inc001GroundTruth,
+  expectedRunId: string,
+): EvaluationCandidate | null {
+  if (!isRecord(value)) {
+    return null;
+  }
   if (
-    !hasExactKeys(value, [...EVALUATION_REPORT_KEYS]) ||
+    !hasExactKeys(value, CANDIDATE_KEYS) ||
+    value.reportType !== "inc001-candidate-v1" ||
     value.dataset !== "sentinelops-synthetic-demo-v1" ||
     value.incidentId !== "INC-001" ||
     typeof value.model !== "string" ||
     value.model.length === 0 ||
+    value.runId !== expectedRunId ||
+    !isUuid(value.runId) ||
+    !isUuid(value.requestId) ||
+    typeof value.retrievedAt !== "string" ||
+    Number.isNaN(Date.parse(value.retrievedAt)) ||
     !Number.isInteger(value.evidenceCount) ||
     Number(value.evidenceCount) < 0 ||
     Number(value.evidenceCount) > 5 ||
     typeof value.response !== "string" ||
     value.response.length === 0 ||
-    !Array.isArray(value.evidence) ||
-    value.evidence.length !== value.evidenceCount ||
-    !value.evidence.every(
-      (item) =>
-        isRecord(item) &&
-        hasExactKeys(item, ["id", "content"]) &&
-        typeof item.id === "string" &&
-        item.id.length > 0 &&
-        typeof item.content === "string" &&
-        item.content.length > 0,
-    ) ||
     (value.ingestion !== "skipped" && value.ingestion !== "completed") ||
     typeof value.abstained !== "boolean" ||
     typeof value.referenceLeaked !== "boolean" ||
-    typeof value.passed !== "boolean" ||
     !isRecord(value.timings) ||
     !hasExactKeys(value.timings, [
       "warmupMs",
@@ -474,95 +668,255 @@ function isInc001EvaluationReport(
       value.ingestion === "skipped"
         ? value.timings.ingestionMs === null
         : isNonNegativeFiniteNumber(value.timings.ingestionMs)
-    ) ||
-    !isRecord(value.evaluation)
-  ) {
-    return false;
-  }
-
-  const evaluation = value.evaluation;
-  if (
-    !hasExactKeys(evaluation, [
-      "retrievalRecall",
-      "answerCoverage",
-      "retrievedObservationIds",
-      "responseObservationIds",
-      "citations",
-      "factualityViolations",
-    ]) ||
-    typeof evaluation.retrievalRecall !== "number" ||
-    !Number.isFinite(evaluation.retrievalRecall) ||
-    evaluation.retrievalRecall < 0 ||
-    evaluation.retrievalRecall > 1 ||
-    typeof evaluation.answerCoverage !== "number" ||
-    !Number.isFinite(evaluation.answerCoverage) ||
-    evaluation.answerCoverage < 0 ||
-    evaluation.answerCoverage > 1 ||
-    !isUniqueKnownObservationIds(
-      evaluation.retrievedObservationIds,
-      groundTruth,
-    ) ||
-    !isUniqueKnownObservationIds(
-      evaluation.responseObservationIds,
-      groundTruth,
-    ) ||
-    !isRecord(evaluation.citations) ||
-    !hasExactKeys(evaluation.citations, ["count", "invalid"]) ||
-    typeof evaluation.citations.count !== "number" ||
-    !Number.isInteger(evaluation.citations.count) ||
-    Number(evaluation.citations.count) < 0 ||
-    !isStringArray(evaluation.citations.invalid) ||
-    evaluation.citations.invalid.length > Number(evaluation.citations.count) ||
-    !evaluation.citations.invalid.every((citation) =>
-      /^\[E\d+\]$/u.test(citation),
-    ) ||
-    !Array.isArray(evaluation.factualityViolations) ||
-    !evaluation.factualityViolations.every(
-      (violation) =>
-        isRecord(violation) &&
-        hasExactKeys(violation, ["id", "description"]) &&
-        typeof violation.id === "string" &&
-        violation.id.length > 0 &&
-        typeof violation.description === "string" &&
-        violation.description.length > 0,
     )
   ) {
-    return false;
+    return null;
   }
 
-  const evidence = value.evidence as Inc001Evidence[];
-  if (new Set(evidence.map(({ id }) => id)).size !== evidence.length) {
-    return false;
+  const manifest = parseManifest(value.evidenceManifest, expectedRunId, value.requestId);
+  const analysis = parseEvaluationAnalysis(value.analysis);
+  if (
+    !manifest ||
+    manifest.length !== value.evidenceCount ||
+    !analysis ||
+    manifest.some((item) => item.retrievedAt !== value.retrievedAt) ||
+    renderInvestigationAnalysis(analysis) !== value.response
+  ) {
+    return null;
   }
-  const recomputed = evaluateInc001Response(
-    value.response,
-    evidence,
-    groundTruth,
-  );
+
+  const aliases = new Set(manifest.map(({ alias }) => alias));
+  const references = [
+    ...analysis.summary_evidence_refs,
+    ...analysis.observed_facts.flatMap(({ evidence_refs }) => evidence_refs),
+    ...analysis.hypotheses.flatMap(({ supporting_evidence, contradicting_evidence }) => [
+      ...supporting_evidence,
+      ...contradicting_evidence,
+    ]),
+  ];
+  if (references.some((reference) => !aliases.has(reference))) {
+    return null;
+  }
+
+  const evidence = manifest.map<Inc001Evidence>((item) => ({
+    id: item.chunkId,
+    content: item.content,
+    alias: item.alias,
+    evidenceScope: item.evidenceScope,
+  }));
   const referenceLeaked = containsEvaluationReference(evidence);
   const abstained = value.model === "not-invoked" || evidence.length === 0;
-  const accepted = isInc001EvaluationAccepted(
-    value.model,
-    evidence,
-    recomputed,
-  );
+  if (
+    value.referenceLeaked !== referenceLeaked ||
+    value.abstained !== abstained
+  ) {
+    return null;
+  }
+  return {
+    dataset: value.dataset,
+    incidentId: "INC-001",
+    model: value.model,
+    evidenceCount: Number(value.evidenceCount),
+    runId: value.runId,
+    requestId: value.requestId,
+    retrievedAt: value.retrievedAt,
+    evidenceManifest: manifest,
+    response: value.response,
+    analysis,
+    ingestion: value.ingestion,
+    timings: {
+      warmupMs: value.timings.warmupMs,
+      ingestionMs: value.timings.ingestionMs as number | null,
+      investigationMs: value.timings.investigationMs,
+    },
+  };
+}
 
-  return (
-    evaluation.retrievalRecall === recomputed.retrievalRecall &&
-    evaluation.answerCoverage === recomputed.answerCoverage &&
-    JSON.stringify(evaluation.retrievedObservationIds) ===
-      JSON.stringify(recomputed.retrievedObservationIds) &&
-    JSON.stringify(evaluation.responseObservationIds) ===
-      JSON.stringify(recomputed.responseObservationIds) &&
-    evaluation.citations.count === recomputed.citations.count &&
-    JSON.stringify(evaluation.citations.invalid) ===
-      JSON.stringify(recomputed.citations.invalid) &&
-    JSON.stringify(evaluation.factualityViolations) ===
-      JSON.stringify(recomputed.factualityViolations) &&
-    value.referenceLeaked === referenceLeaked &&
-    value.abstained === abstained &&
-    value.passed === accepted
+function isTraceVerificationReport(value: unknown): value is TraceVerificationReport {
+  if (
+    isRecord(value) &&
+    hasExactKeys(value, [
+      "status",
+      "verifiedCount",
+      "unverifiedCount",
+      "failedCount",
+      "verificationErrors",
+      "verifiedEvidenceIds",
+      "requestId",
+      "runId",
+      "evidence",
+    ]) &&
+    ["verified", "unverified", "failed"].includes(String(value.status)) &&
+    Number.isInteger(value.verifiedCount) &&
+    Number.isInteger(value.unverifiedCount) &&
+    Number.isInteger(value.failedCount) &&
+    isStringArray(value.verificationErrors) &&
+    isStringArray(value.verifiedEvidenceIds) &&
+    isUuid(value.requestId) &&
+    isUuid(value.runId) &&
+    Array.isArray(value.evidence) &&
+    value.evidence.every(
+      (item) =>
+        isRecord(item) &&
+        hasExactKeys(item, ["evidenceId", "status"]) &&
+        isUuid(item.evidenceId) &&
+        ["verified", "unverified", "failed"].includes(String(item.status)),
+    )
+  ) {
+    const evidence = value.evidence as Array<{
+      evidenceId: string;
+      status: string;
+    }>;
+    const verifiedIds = evidence
+      .filter(({ status }) => status === "verified")
+      .map(({ evidenceId }) => evidenceId);
+    const unverifiedCount = evidence.filter(
+      ({ status }) => status === "unverified",
+    ).length;
+    const failedCount = evidence.filter(
+      ({ status }) => status === "failed",
+    ).length;
+    const verifiedCount = verifiedIds.length;
+    const expectedStatus =
+      value.verificationErrors.length > 0 || value.failedCount > 0
+        ? "failed"
+        : unverifiedCount > 0
+          ? "unverified"
+          : "verified";
+    return (
+      value.verifiedCount === verifiedCount &&
+      value.unverifiedCount === unverifiedCount &&
+      Number(value.failedCount) >= failedCount &&
+      value.status === expectedStatus &&
+      isDeepStrictEqual(value.verifiedEvidenceIds, verifiedIds) &&
+      new Set(evidence.map(({ evidenceId }) => evidenceId)).size ===
+        evidence.length
+    );
+  }
+  return false;
+}
+
+function createVerifiedReport(
+  candidate: EvaluationCandidate,
+  traceVerification: TraceVerificationReport,
+  groundTruth: Inc001GroundTruth,
+): Record<string, unknown> {
+  const evaluation = evaluateInc001VerifiedClaims(
+    candidate.response,
+    candidate.analysis,
+    candidate.evidenceManifest,
+    traceVerification.evidence,
+    groundTruth,
   );
+  const evidence = candidate.evidenceManifest.map<Inc001Evidence>((item) => ({
+    id: item.chunkId,
+    content: item.content,
+    alias: item.alias,
+    evidenceScope: item.evidenceScope,
+  }));
+  const referenceLeaked = containsEvaluationReference(evidence);
+  const abstained = candidate.model === "not-invoked" || evidence.length === 0;
+  const passed =
+    traceVerification.status === "verified" &&
+    isInc001VerifiedEvaluationAccepted(
+      candidate.model,
+      candidate.evidenceManifest,
+      evaluation,
+      referenceLeaked,
+    );
+  return {
+    ...candidate,
+    reportType: "inc001-verified-v1",
+    abstained,
+    referenceLeaked,
+    traceVerification,
+    evaluation,
+    passed,
+  };
+}
+
+function traceMatchesCandidate(
+  traceVerification: TraceVerificationReport,
+  candidate: EvaluationCandidate,
+): boolean {
+  return (
+    traceVerification.runId === candidate.runId &&
+    traceVerification.requestId === candidate.requestId &&
+    isDeepStrictEqual(
+      traceVerification.evidence.map(({ evidenceId }) => evidenceId),
+      candidate.evidenceManifest.map(({ evidenceId }) => evidenceId),
+    )
+  );
+}
+
+export function parseEvaluationTraceExpectation(
+  candidateOutput: string,
+  groundTruth: Inc001GroundTruth,
+  expectedRunId: string,
+  expectedProjectId: string,
+): {
+  runId: string;
+  requestId: string;
+  projectId: string;
+  incidentId: string;
+  retrievedAt: string;
+  manifest: EvidenceManifestItem[];
+} {
+  let value: unknown;
+  try {
+    value = JSON.parse(candidateOutput);
+  } catch {
+    throw new Error("Evaluator output is not valid JSON.");
+  }
+  const candidate = parseCandidate(value, groundTruth, expectedRunId);
+  if (
+    !candidate ||
+    candidate.evidenceManifest.some(
+      (item) => item.projectId !== expectedProjectId,
+    )
+  ) {
+    throw new Error("Evaluator candidate does not match the isolated project.");
+  }
+  return {
+    runId: candidate.runId,
+    requestId: candidate.requestId,
+    projectId: expectedProjectId,
+    incidentId: "INC-001",
+    retrievedAt: candidate.retrievedAt,
+    manifest: candidate.evidenceManifest,
+  };
+}
+
+export function finalizeEvaluationOutput(
+  candidateOutput: string,
+  groundTruth: Inc001GroundTruth,
+  expectedRunId: string,
+  traceVerification: TraceVerificationReport,
+): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(candidateOutput);
+  } catch {
+    throw new Error("Evaluator output is not valid JSON.");
+  }
+  const candidate = parseCandidate(value, groundTruth, expectedRunId);
+  if (
+    !candidate ||
+    !isTraceVerificationReport(traceVerification) ||
+    !traceMatchesCandidate(traceVerification, candidate)
+  ) {
+    throw new Error("Evaluator candidate or retrieval verification is invalid.");
+  }
+  const finalized = createVerifiedReport(
+    candidate,
+    traceVerification,
+    groundTruth,
+  );
+  const output = JSON.stringify(finalized, null, 2);
+  if (!summarizeEvaluationOutput(output, groundTruth).parsed) {
+    throw new Error("Finalized evaluation report failed integrity validation.");
+  }
+  return output;
 }
 
 export function summarizeEvaluationOutput(
@@ -571,13 +925,66 @@ export function summarizeEvaluationOutput(
 ): EvaluationOutcome {
   try {
     const value: unknown = JSON.parse(stdout);
-    const parsed = isInc001EvaluationReport(value, groundTruth);
+    const parsed =
+      isRecord(value) &&
+      hasExactKeys(value, VERIFIED_REPORT_KEYS) &&
+      value.reportType === "inc001-verified-v1" &&
+      typeof value.runId === "string" &&
+      isUuid(value.runId) &&
+      isTraceVerificationReport(value.traceVerification) &&
+      value.traceVerification.runId === value.runId &&
+      typeof value.requestId === "string" &&
+      value.traceVerification.requestId === value.requestId &&
+      isRecord(value.timings) &&
+      typeof value.model === "string"
+        ? (() => {
+            const candidateValue = {
+              reportType: "inc001-candidate-v1",
+              dataset: value.dataset,
+              incidentId: value.incidentId,
+              model: value.model,
+              evidenceCount: value.evidenceCount,
+              runId: value.runId,
+              requestId: value.requestId,
+              retrievedAt: value.retrievedAt,
+              evidenceManifest: value.evidenceManifest,
+              response: value.response,
+              analysis: value.analysis,
+              ingestion: value.ingestion,
+              timings: value.timings,
+              abstained: value.abstained,
+              referenceLeaked: value.referenceLeaked,
+            };
+            const candidate = parseCandidate(
+              candidateValue,
+              groundTruth,
+              value.runId,
+            );
+            if (
+              !candidate ||
+              !traceMatchesCandidate(value.traceVerification, candidate) ||
+              !isDeepStrictEqual(
+                createVerifiedReport(
+                  candidate,
+                  value.traceVerification,
+                  groundTruth,
+                ),
+                value,
+              )
+            ) {
+              return false;
+            }
+            return true;
+          })()
+        : false;
     return {
       parsed,
-      passed: parsed && typeof value.passed === "boolean" ? value.passed : null,
+      passed: parsed && isRecord(value) && typeof value.passed === "boolean"
+        ? value.passed
+        : null,
       model: parsed && typeof value.model === "string" ? value.model : null,
       timings: parsed ? value.timings : null,
-      validationErrors: parsed ? [] : ["invalid or incomplete evaluation report"],
+      validationErrors: parsed ? [] : ["invalid or incomplete verified evaluation report"],
     };
   } catch {
     return {
@@ -585,7 +992,7 @@ export function summarizeEvaluationOutput(
       passed: null,
       model: null,
       timings: null,
-      validationErrors: ["invalid or incomplete evaluation report"],
+      validationErrors: ["invalid or incomplete verified evaluation report"],
     };
   }
 }
