@@ -318,7 +318,7 @@ async function main(): Promise<void> {
     const env = migrationEnvironment(port);
     const node = process.execPath;
     const migrate = () =>
-      run(node, ["--import=tsx", "src/migrate.ts"], {
+      run(node, ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/migrate.ts"], {
         cwd: apiDirectory,
         env,
         printOutput: true,
@@ -331,7 +331,8 @@ async function main(): Promise<void> {
     run(
       node,
       [
-        "--import=tsx",
+        "--experimental-transform-types",
+        "--import=./scripts/node-ts-register.mjs",
         "--test",
         "--test-concurrency=1",
         "--test-reporter=spec",

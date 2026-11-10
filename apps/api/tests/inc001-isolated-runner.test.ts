@@ -905,11 +905,11 @@ const evaluationContent = [
       '{"incident_id":"INC-001","event":"payment_request_completed","service":"payment-gateway","status_code":200,"duration_ms":180}',
 ].join("\n");
 const completeAnalysis = {
-  summary: "Cinco intentos paralelos comparten req-7841.",
+  summary: "Cinco intentos paralelos de create_order comparten req-7841.",
   summary_evidence_refs: ["E1"],
   observed_facts: [
-    { claim: "Cinco intentos paralelos comparten req-7841.", evidence_refs: ["E1"] },
-    { claim: "El pool llegó al máximo (20/20), con cero conexiones libres y 18 solicitudes esperando.", evidence_refs: ["E1"] },
+    { claim: "Cinco intentos paralelos de create_order comparten req-7841.", evidence_refs: ["E1"] },
+    { claim: "El pool llegó al máximo con 20 conexiones activas (20/20), cero conexiones libres y 18 solicitudes esperando.", evidence_refs: ["E1"] },
     { claim: "POST /api/orders con req-7841 agotó el tiempo de espera al adquirir conexión y recibió HTTP 500.", evidence_refs: ["E1"] },
     { claim: "La cola de reintentos alcanzó 42, con 120 reintentos iniciados durante el último minuto.", evidence_refs: ["E1"] },
     { claim: "El pool permaneció saturado con 20 conexiones activas, cero inactivas y 31 solicitudes esperando.", evidence_refs: ["E1"] },
@@ -1455,7 +1455,7 @@ test("V2 records individual citation occurrences and refuses an irrelevant reuse
     ({ claimId }) => claimId === "fact:6",
   );
   assert.equal(relationship?.status, "invalid");
-  assert.ok(relationship?.reasons.includes("evidence_irrelevant_to_claim_occurrence"));
+  assert.ok(relationship?.reasons.includes("claim_mixes_unrelated_event_contexts"));
   assert.equal(result.metrics.citationValidity.invalid, 1);
   assert.equal(result.accepted, false);
 });
@@ -1473,6 +1473,75 @@ test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {
   assert.equal(obs02?.status, "complete");
   assert.equal(obs05?.status, "complete");
   assert.equal(obs05?.coveredComponents.includes("pool-waiting:18"), false);
+});
+
+test("V2 rejects a claim that combines OBS-02 capacity with the later OBS-05 wait count", () => {
+  const analysis = {
+    ...completeAnalysis,
+    observed_facts: completeAnalysis.observed_facts.map((fact, index) =>
+      index === 1
+        ? { claim: "El mismo evento tuvo máximo de 20, cero conexiones libres y 31 solicitudes esperando.", evidence_refs: ["E1"] }
+        : fact,
+    ),
+  };
+  const result = evaluateInc001V2({
+    response: renderInvestigationAnalysis(analysis), analysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+  });
+  const relationship = result.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:1");
+  assert.equal(relationship?.status, "invalid");
+  assert.ok(relationship?.reasons.includes("claim_mixes_unrelated_event_contexts"));
+});
+
+test("V2 treats E2-style static code as contextual configuration, never execution", () => {
+  const code = [
+    "const MAX_PARALLEL_ATTEMPTS = 5;",
+    "export async function dispatchOrderRetries(requestId: string, createOrder: () => Promise<unknown>) {",
+    "  const attempts = Array.from({ length: MAX_PARALLEL_ATTEMPTS }, () => createOrder());",
+    "  return Promise.all(attempts);",
+    "}",
+  ].join("\n");
+  const manifest = [{ ...evaluationManifest[0]!, content: code, contentHash: hashChunkContent(code) }];
+  const trace = {
+    ...verifiedTrace,
+    evidence: [{
+      ...verifiedTrace.evidence[0]!,
+      attestation: {
+        ...verifiedTrace.evidence[0]!.attestation!,
+        expectedContentHash: hashChunkContent(code), storedContentHash: hashChunkContent(code),
+        recomputedContentHash: hashChunkContent(code),
+        metadata: { ...verifiedTrace.evidence[0]!.attestation!.metadata, documentTitle: "retry-dispatcher.synthetic.ts", sourceDocumentKey: "incident-001/retry-dispatcher.synthetic.ts" },
+      },
+    }],
+  };
+  const validAnalysis = { ...completeAnalysis, observed_facts: [{ claim: "El código sintético configura cinco intentos paralelos.", evidence_refs: ["E1"] }] };
+  const valid = evaluateInc001V2({ response: renderInvestigationAnalysis(validAnalysis), analysis: validAnalysis, manifest, trace, groundTruth: evaluationGroundTruth });
+  assert.equal(valid.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:0")?.contextualOnly, true);
+  assert.equal(valid.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:0")?.status, "valid");
+
+  const executionAnalysis = { ...validAnalysis, observed_facts: [{ claim: "El código sintético se ejecutó en producción con cinco intentos paralelos.", evidence_refs: ["E1"] }] };
+  const execution = evaluateInc001V2({ response: renderInvestigationAnalysis(executionAnalysis), analysis: executionAnalysis, manifest, trace, groundTruth: evaluationGroundTruth });
+  assert.equal(execution.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:0")?.status, "invalid");
+  assert.ok(execution.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:0")?.reasons.includes("static_code_does_not_prove_execution_or_causality"));
+
+  const unrelatedUseCode = code.replace(
+    "Array.from({ length: MAX_PARALLEL_ATTEMPTS }, () => createOrder())",
+    "Array.from({ length: 2 }, () => createOrder());\n  const unrelatedLimit = MAX_PARALLEL_ATTEMPTS",
+  );
+  const unrelatedManifest = [{ ...manifest[0]!, content: unrelatedUseCode, contentHash: hashChunkContent(unrelatedUseCode) }];
+  const unrelatedTrace = {
+    ...trace,
+    evidence: [{
+      ...trace.evidence[0]!,
+      attestation: {
+        ...trace.evidence[0]!.attestation!,
+        expectedContentHash: hashChunkContent(unrelatedUseCode), storedContentHash: hashChunkContent(unrelatedUseCode),
+        recomputedContentHash: hashChunkContent(unrelatedUseCode),
+      },
+    }],
+  };
+  const unrelated = evaluateInc001V2({ response: renderInvestigationAnalysis(validAnalysis), analysis: validAnalysis, manifest: unrelatedManifest, trace: unrelatedTrace, groundTruth: evaluationGroundTruth });
+  assert.equal(unrelated.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:0")?.status, "invalid");
 });
 
 test("a valid passing report and successful evaluator and cleanup are jointly required for PASS", () => {

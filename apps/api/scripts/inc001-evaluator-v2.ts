@@ -32,6 +32,15 @@ const OBSERVATIONS: readonly ObservationDefinition[] = [
   { id: "OBS-06", components: ["service:payment-gateway", "http:200", "duration-ms:180"] },
 ] as const;
 
+const OBSERVATION_DISCRIMINATORS: Record<string, readonly string[]> = {
+  "OBS-01": ["operation:create_order", "attempts:5", "parallel"],
+  "OBS-02": ["pool-max:20", "pool-waiting:18"],
+  "OBS-03": ["path:POST:/api/orders", "http:500", "pool-timeout"],
+  "OBS-04": ["retry-queue:42", "retries-minute:120"],
+  "OBS-05": ["pool-persistent", "pool-waiting:31"],
+  "OBS-06": ["service:payment-gateway", "http:200", "duration-ms:180"],
+};
+
 export interface V2Claim {
   id: string;
   kind: V2ClaimKind;
@@ -51,8 +60,15 @@ export interface V2ClaimEvidenceRelationship {
   provenance: "verified" | "failed" | "unverified";
   evidenceComponents: string[];
   supportedComponents: string[];
+  contextIds: string[];
   contextualOnly: boolean;
   reasons: string[];
+}
+
+interface EvidenceContext {
+  id: string;
+  kind: "event" | "static_code";
+  components: Set<string>;
 }
 
 export interface V2ObservationResult {
@@ -107,9 +123,9 @@ function componentsInText(text: string): Set<string> {
   if (textHas(text, /\bcreate[_ ]order\b/iu)) found.add("operation:create_order");
   if (textHas(text, /\b(?:5|five|cinco)\s+(?:parallel\w*\s+)?(?:attempts?|intentos?)\b/iu)) found.add("attempts:5");
   if (textHas(text, /\b(?:parallel|paralel\w*|concurrent\w*)\b/iu)) found.add("parallel");
-  if (textHas(text, /(?:active_connections\D{0,12}20|20\s+(?:active\s+)?connections|20\s+conexiones\s+activas)/iu)) found.add("pool-active:20");
+  if (textHas(text, /(?:active_connections\D{0,12}20|20\s+(?:active\s+)?connections|20\s+conexiones\s+activas|20\s*\/\s*20)/iu)) found.add("pool-active:20");
   if (textHas(text, /(?:max_connections\D{0,12}20|20\s*\/\s*20|maximum\s+of\s+20|m[aá]ximo\s+de\s+20)/iu)) found.add("pool-max:20");
-  if (textHas(text, /(?:idle_connections\D{0,12}0|(?:zero|0|cero|ninguna)\s+(?:idle|free|inactivas|libres))/iu)) found.add("pool-idle:0");
+  if (textHas(text, /(?:idle_connections\D{0,12}0|(?:zero|0|cero|ninguna)\s+(?:\w+\s+){0,2}(?:idle|free|inactivas|libres))/iu)) found.add("pool-idle:0");
   if (textHas(text, /(?:waiting_requests\D{0,12}18|18\s+(?:waiting\s+requests|solicitudes\s+(?:en espera|esperando)))/iu)) found.add("pool-waiting:18");
   if (textHas(text, /(?:waiting_requests\D{0,12}31|31\s+(?:waiting\s+requests|solicitudes\s+(?:en espera|esperando)))/iu)) found.add("pool-waiting:31");
   if (textHas(text, /\b(?:persist\w*|remained\s+saturated|permaneci[oó]\s+saturad\w*)\b/iu)) found.add("pool-persistent");
@@ -121,12 +137,16 @@ function componentsInText(text: string): Set<string> {
   if (textHas(text, /\bpayment-gateway\b/iu)) found.add("service:payment-gateway");
   if (textHas(text, /(?:HTTP\s*200|status_code\D{0,12}200)/iu)) found.add("http:200");
   if (textHas(text, /(?:duration_ms\D{0,12}180|\b180\s*ms\b|180\s+milisegundos)/iu)) found.add("duration-ms:180");
+  if (textHas(text, /\b(?:no|not|never)\s+(?:permaneci\w*|remained|persist\w*)/iu)) found.delete("pool-persistent");
   return found;
 }
 
 function eventComponents(event: Inc001Event): Set<string> {
   const fields = event.fields;
-  const parts = componentsInText(JSON.stringify(fields));
+  // Event evidence is derived from typed fields and an expected event name.
+  // Free-form messages are not allowed to smuggle numeric components into a
+  // different event type.
+  const parts = new Set<string>();
   if (fields.event === "parallel_attempts_scheduled") {
     if (fields.request_id === "req-7841") parts.add("request:req-7841");
     if (fields.operation === "create_order") parts.add("operation:create_order");
@@ -171,23 +191,57 @@ function staticCodeComponents(content: string): Set<string> {
   for (;;) {
     const kind = scanner.scan();
     if (kind === SyntaxKind.EndOfFile) break;
-    tokens.push(scanner.getTokenValue() || scanner.getTokenText());
+    tokens.push(scanner.getTokenText());
   }
-  const tokenSequence = (parts: string[]): boolean => {
-    let cursor = 0;
-    for (const part of parts) {
-      const found = tokens.indexOf(part, cursor);
-      if (found === -1) return false;
-      cursor = found + 1;
+  const declaration = tokens.findIndex((token, index) =>
+    token === "const" && tokens[index + 1] === "MAX_PARALLEL_ATTEMPTS" &&
+    tokens[index + 2] === "=" && tokens[index + 3] === "5",
+  );
+  const functionStart = tokens.findIndex((token, index) =>
+    token === "function" && tokens[index + 1] === "dispatchOrderRetries",
+  );
+  const functionBodyStart = functionStart === -1 ? -1 : tokens.indexOf("{", functionStart);
+  let functionBodyEnd = -1;
+  if (functionBodyStart !== -1) {
+    let depth = 0;
+    for (let index = functionBodyStart; index < tokens.length; index += 1) {
+      if (tokens[index] === "{") depth += 1;
+      if (tokens[index] === "}") depth -= 1;
+      if (depth === 0) { functionBodyEnd = index; break; }
     }
-    return true;
+  }
+  const body = functionBodyStart === -1 || functionBodyEnd === -1
+    ? []
+    : tokens.slice(functionBodyStart + 1, functionBodyEnd);
+  const matchingClose = (openIndex: number, open: string, close: string): number => {
+    let depth = 0;
+    for (let index = openIndex; index < body.length; index += 1) {
+      if (body[index] === open) depth += 1;
+      if (body[index] === close) depth -= 1;
+      if (depth === 0) return index;
+    }
+    return -1;
   };
-  const constantFive = tokenSequence(["MAX_PARALLEL_ATTEMPTS", "=", "5"]);
-  const createsUsingConstant = tokenSequence(["Array", ".", "from"]) && tokens.includes("MAX_PARALLEL_ATTEMPTS");
-  const promiseAll = tokenSequence(["Promise", ".", "all"]);
+  const attemptsAssignment = body.findIndex((token, index) =>
+    token === "const" && body[index + 1] === "attempts" && body[index + 2] === "=" &&
+    body[index + 3] === "Array" && body[index + 4] === "." && body[index + 5] === "from",
+  );
+  const arrayFromOpen = attemptsAssignment === -1 ? -1 : attemptsAssignment + 6;
+  const arrayFromClose = arrayFromOpen === -1 || body[arrayFromOpen] !== "("
+    ? -1
+    : matchingClose(arrayFromOpen, "(", ")");
+  // The constant must participate in this exact Array.from invocation, rather
+  // than merely appearing later in the enclosing function.
+  const createsUsingConstant = arrayFromClose !== -1 &&
+    body.slice(arrayFromOpen + 1, arrayFromClose).includes("MAX_PARALLEL_ATTEMPTS");
+  const promiseAllAttempts = body.some((token, index) =>
+    token === "Promise" && body[index + 1] === "." && body[index + 2] === "all" &&
+    body[index + 3] === "(" && body[index + 4] === "attempts",
+  );
+  const constantFive = declaration !== -1;
   const components = new Set<string>();
   if (constantFive && createsUsingConstant) components.add("attempts:5");
-  if (constantFive && createsUsingConstant && promiseAll) components.add("parallel");
+  if (constantFive && createsUsingConstant && promiseAllAttempts) components.add("parallel");
   return components;
 }
 
@@ -199,8 +253,10 @@ function buildClaims(analysis: InvestigationAnalysis): V2Claim[] {
   add("summary:0", "summary", analysis.summary, analysis.summary_evidence_refs, true);
   analysis.observed_facts.forEach((fact, index) => add(`fact:${index}`, "observed_fact", fact.claim, fact.evidence_refs, true));
   analysis.hypotheses.forEach((hypothesis, index) => {
-    add(`hypothesis:${index}:support`, "hypothesis_support", hypothesis.statement, hypothesis.supporting_evidence, true);
-    if (hypothesis.contradicting_evidence.length > 0) add(`hypothesis:${index}:contradiction`, "hypothesis_contradiction", hypothesis.statement, hypothesis.contradicting_evidence, true);
+    // Hypotheses are audited through their directional references, but an
+    // explicitly unverified hypothesis is not treated as a confirmed fact.
+    add(`hypothesis:${index}:support`, "hypothesis_support", hypothesis.statement, hypothesis.supporting_evidence, false);
+    if (hypothesis.contradicting_evidence.length > 0) add(`hypothesis:${index}:contradiction`, "hypothesis_contradiction", hypothesis.statement, hypothesis.contradicting_evidence, false);
   });
   analysis.missing_information.forEach((text, index) => add(`missing-information:${index}`, "missing_information", text, [], false));
   analysis.next_checks.forEach((text, index) => add(`next-check:${index}`, "recommendation", text, [], /\b(?:was|were|is|are|fue|son|es|registr|HTTP|\d)\b/iu.test(text)));
@@ -227,15 +283,13 @@ export function evaluateInc001V2(input: {
   const verificationById = new Map(input.trace.evidence.map((item) => [item.evidenceId, item]));
   const claims = buildClaims(input.analysis);
   const evidenceComponents = new Map<string, Set<string>>();
-  const evidenceComponentGroups = new Map<string, Set<string>[]>();
-  const evidenceContexts = new Map<string, string[]>();
+  const evidenceContexts = new Map<string, EvidenceContext[]>();
 
   for (const item of input.manifest) {
     const verification = verificationById.get(item.evidenceId);
     const usable = traceVerified && verification?.status === "verified" && verification.attestation?.hashesMatch === true && verification.attestation.contentMatchesManifest === true;
     const components = new Set<string>();
-    const groups: Set<string>[] = [];
-    const contexts: string[] = [];
+    const contexts: EvidenceContext[] = [];
     if (usable && item.evidenceScope === "incident_specific" && item.incidentId === "INC-001") {
       try {
         const extraction = extractInc001JsonlEvents(item, input.trace, {
@@ -244,8 +298,7 @@ export function evaluateInc001V2(input: {
         for (const event of extraction.events) {
           const eventParts = eventComponents(event);
           for (const component of eventParts) components.add(component);
-          groups.push(eventParts);
-          contexts.push(`event:${event.id}`);
+          contexts.push({ id: `event:${event.id}`, kind: "event", components: eventParts });
         }
       } catch {
         // A non-JSONL chunk may still be statically evaluable code below.
@@ -256,13 +309,11 @@ export function evaluateInc001V2(input: {
         const staticParts = staticCodeComponents(item.content);
         for (const component of staticParts) components.add(component);
         if (staticParts.size > 0) {
-          groups.push(staticParts);
-          contexts.push(`static-code:${item.evidenceId}`);
+          contexts.push({ id: `static-code:${item.evidenceId}`, kind: "static_code", components: staticParts });
         }
       }
     }
     evidenceComponents.set(item.evidenceId, components);
-    evidenceComponentGroups.set(item.evidenceId, groups);
     evidenceContexts.set(item.evidenceId, contexts);
   }
 
@@ -272,12 +323,20 @@ export function evaluateInc001V2(input: {
     const evidence = byAlias.get(alias);
     const verification = evidence ? verificationById.get(evidence.evidenceId) : undefined;
     const evidenceParts = evidence ? evidenceComponents.get(evidence.evidenceId) ?? new Set<string>() : new Set<string>();
-    const groups = evidence ? evidenceComponentGroups.get(evidence.evidenceId) ?? [] : [];
-    const supported = groups
-      .map((group) => [...group].filter((component) => claim.components.includes(component)))
-      .sort((left, right) => right.length - left.length)[0] ?? [];
-    const observationIds = OBSERVATIONS.filter((definition) => supported.some((component) => definition.components.includes(component))).map(({ id }) => id);
-    const contextualOnly = evidence !== undefined && evidenceContexts.get(evidence.evidenceId)?.some((context) => context.startsWith("static-code:")) === true;
+    const contexts = evidence ? evidenceContexts.get(evidence.evidenceId) ?? [] : [];
+    const selectedContext = contexts
+      .map((context) => ({ context, supported: [...context.components].filter((component) => claim.components.includes(component)) }))
+      .sort((left, right) => right.supported.length - left.supported.length)[0];
+    const supported = selectedContext?.supported ?? [];
+    const observationIds = OBSERVATIONS.filter((definition) => {
+      const discriminators = OBSERVATION_DISCRIMINATORS[definition.id] ?? [];
+      return supported.some((component) => discriminators.includes(component));
+    }).map(({ id }) => id);
+    const claimedObservationIds = OBSERVATIONS.filter((definition) =>
+      (OBSERVATION_DISCRIMINATORS[definition.id] ?? [])
+        .some((component) => claim.components.includes(component)),
+    ).map(({ id }) => id);
+    const contextualOnly = selectedContext?.context.kind === "static_code";
     const reasons: string[] = [];
     let status: V2RelationshipStatus = "invalid";
     let provenance: "verified" | "failed" | "unverified" = verification?.status ?? "unverified";
@@ -292,6 +351,12 @@ export function evaluateInc001V2(input: {
     } else if (supported.length === 0 || observationIds.length === 0) {
       status = "invalid";
       reasons.push("evidence_irrelevant_to_claim_occurrence");
+    } else if (
+      claimedObservationIds.length > 1 &&
+      claimedObservationIds.some((id) => !observationIds.includes(id))
+    ) {
+      status = "invalid";
+      reasons.push("claim_mixes_unrelated_event_contexts");
     } else if (contextualOnly && /(?:production|producci[oó]n|deployed|desplegad|executed|ejecutad|caus[aoó]|root cause|causa ra[ií]z)/iu.test(claim.text)) {
       status = "invalid";
       reasons.push("static_code_does_not_prove_execution_or_causality");
@@ -302,17 +367,39 @@ export function evaluateInc001V2(input: {
       status = "valid";
       if (contextualOnly) reasons.push("static_configuration_only");
     }
-    relationships.push({ claimId: claim.id, referenceOccurrence: occurrence, evidenceAlias: alias, evidenceId: evidence?.evidenceId ?? null, observationIds, status, provenance, evidenceComponents: [...evidenceParts].sort(), supportedComponents: supported.sort(), contextualOnly, reasons });
+    relationships.push({ claimId: claim.id, referenceOccurrence: occurrence, evidenceAlias: alias, evidenceId: evidence?.evidenceId ?? null, observationIds, status, provenance, evidenceComponents: [...evidenceParts].sort(), supportedComponents: supported.sort(), contextIds: selectedContext ? [selectedContext.context.id] : [], contextualOnly, reasons });
   }));
 
   const observationMatrix = OBSERVATIONS.map((definition) => {
-    const recoveredEvidence = input.manifest.filter((item) => [...(evidenceComponents.get(item.evidenceId) ?? [])].some((component) => definition.components.includes(component)));
-    const recovered = new Set(recoveredEvidence.flatMap((item) => [...(evidenceComponents.get(item.evidenceId) ?? [])].filter((component) => definition.components.includes(component))));
+    const recoveredContexts = input.manifest.flatMap((item) =>
+      (evidenceContexts.get(item.evidenceId) ?? []).map((context) => ({ item, context })),
+    );
+    const completeRetrievedContexts = recoveredContexts.filter(({ context }) =>
+      definition.components.every((component) => context.components.has(component)),
+    );
+    const recovered = new Set(
+      completeRetrievedContexts.flatMap(({ context }) => [...context.components]),
+    );
     const validRelationships = relationships.filter((relationship) => relationship.status === "valid" || relationship.status === "partial");
-    const covered = new Set(validRelationships.filter((relationship) => relationship.observationIds.includes(definition.id)).flatMap((relationship) => relationship.supportedComponents.filter((component) => definition.components.includes(component))));
-    const claimIds = [...new Set(validRelationships.filter((relationship) => relationship.observationIds.includes(definition.id)).map(({ claimId }) => claimId))];
-    const evidenceIds = [...new Set(recoveredEvidence.map(({ evidenceId }) => evidenceId))];
-    const contexts = [...new Set(recoveredEvidence.flatMap((item) => evidenceContexts.get(item.evidenceId) ?? []))];
+    const relationshipsForObservation = validRelationships.filter((relationship) => relationship.observationIds.includes(definition.id));
+    const completeCoveredContexts = [...new Set(relationshipsForObservation.flatMap(({ contextIds }) => contextIds))].filter((contextId) => {
+      const coveredByContext = new Set(
+        relationshipsForObservation
+          .filter((relationship) => relationship.contextIds.includes(contextId))
+          .flatMap(({ supportedComponents }) => supportedComponents),
+      );
+      return definition.components.every((component) => coveredByContext.has(component));
+    });
+    const covered = new Set(
+      completeCoveredContexts.flatMap((contextId) =>
+        relationshipsForObservation
+          .filter((relationship) => relationship.contextIds.includes(contextId))
+          .flatMap(({ supportedComponents }) => supportedComponents),
+      ),
+    );
+    const claimIds = [...new Set(relationshipsForObservation.filter((relationship) => completeCoveredContexts.some((contextId) => relationship.contextIds.includes(contextId))).map(({ claimId }) => claimId))];
+    const evidenceIds = [...new Set(completeRetrievedContexts.map(({ item }) => item.evidenceId))];
+    const contexts = [...new Set(completeRetrievedContexts.map(({ context }) => context.id))];
     const missingRecovered = definition.components.filter((component) => !recovered.has(component));
     const missingCovered = definition.components.filter((component) => !covered.has(component));
     const contradictions: string[] = [];

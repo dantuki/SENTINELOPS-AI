@@ -46,9 +46,18 @@ contenido o incident ID.
 
 Cada cita se clasifica individualmente como `valid`, `partial`, `invalid` o
 `not_evaluable`. Una cita válida para un claim no valida otra aparición del
-mismo alias. La evidencia de código solo otorga soporte contextual a
-propiedades estáticas cuando se verifican una constante, su uso estructural y
-la llamada de paralelismo. Nunca demuestra despliegue, ejecución ni causalidad.
+mismo alias. Cada evento JSONL y cada fragmento de código es un contexto
+separado: todos los componentes de una relación deben proceder del mismo
+contexto, sin mezclar mediciones de eventos diferentes.
+
+La evidencia de código solo otorga soporte contextual a propiedades estáticas
+cuando el scanner encuentra `MAX_PARALLEL_ATTEMPTS = 5`, su uso dentro de la
+misma llamada `Array.from` que construye `attempts`, y
+`Promise.all(attempts)` en la misma función `dispatchOrderRetries`. Los
+comentarios y una constante usada en otra expresión no bastan. Esta regla
+estructural es deliberadamente estrecha y no es un análisis de flujo completo;
+si no se demuestra esa relación, el componente no se acredita. Nunca demuestra
+despliegue, ejecución ni causalidad.
 
 OBS-02 y OBS-05 se mantienen separadas por sus componentes de evento: la
 medición de 18 solicitudes esperando no completa la medición posterior de 31.

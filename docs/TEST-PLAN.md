@@ -485,8 +485,40 @@ un item que supera sus comprobaciones individuales, aunque bloquean todo uso
 posterior de la traza. El evaluador separa eventos JSONL, citas por aparición,
 componentes OBS-01 a OBS-06 y soporte contextual de código estático.
 
-En esta modificación pasaron los typechecks de API, runner y web. La suite API
-no se pudo iniciar en el host porque Node devolvió `uv_os_get_passwd: ENOMEM`
-al cargar `tsx`; no se interpreta como resultado de las pruebas. No se
-ejecutaron Docker, PostgreSQL, migraciones, runner aislado, Ollama ni INC-001,
-por lo que Phase 3.1 y el Reliability Gate siguen bloqueados.
+En esta modificación pasaron los typechecks de API, runner y web. En la
+validación inicial la suite API no se pudo iniciar porque Node devolvió
+`uv_os_get_passwd: ENOMEM` al cargar `tsx`; ese fallo de host no se interpretó
+como resultado de las pruebas. No se ejecutaron Docker, PostgreSQL,
+migraciones, runner aislado ni INC-001, por lo que Phase 3.1 y el Reliability
+Gate siguen bloqueados.
+
+### Hardening de runtime y Evaluator V2 — 9 de noviembre de 2026
+
+| Comprobación | Resultado |
+|---|---|
+| Diagnóstico Node | `node --version` y JavaScript simple funcionan; `os.userInfo()` y `tsx` fallan con `uv_os_get_passwd: ENOMEM`. No se pudo consultar la memoria del sistema desde este entorno, por lo que no se atribuye el fallo a falta de RAM. |
+| Runner TypeScript local | API y runners pasan a Node nativo con `--experimental-transform-types` y un resolver local para especificadores relativos `.js` de TypeScript; se conserva `tsx` como dependencia, pero no se carga en esos comandos. |
+| `npm.cmd test --workspace=@sentinelops/api` | 146 aprobadas, 0 fallidas. |
+| `npm.cmd run typecheck --workspace=@sentinelops/api` | Aprobado. |
+| `npm.cmd run typecheck:runner --workspace=@sentinelops/api` | Aprobado. |
+| `npm.cmd run build --workspace=@sentinelops/api` | Aprobado. |
+| `npm.cmd run typecheck --workspace=@sentinelops/web` | Aprobado. |
+| `npm.cmd run build --workspace=@sentinelops/web` | Aprobado. |
+| `git diff --check` | Aprobado. |
+| Preflight aislado de INC-001 | Falló sin iniciar evaluación: daemon Docker no alcanzable, imagen `pgvector/pgvector:0.8.7-pg18-trixie` ausente y dependencias del entorno virtual del orquestador no importan. |
+| Ollama en preflight | Disponible en `127.0.0.1:11434`; modelos `qwen3.5:4b` y `qwen3-embedding:0.6b` presentes. No se hicieron inferencias. |
+
+El Evaluator V2 conserva cada evento JSONL y cada fragmento de código como un
+contexto de evidencia separado. Una relación claim-evidence debe obtener sus
+componentes de un único contexto; por ello OBS-02 y OBS-05 no se completan
+mezclando los valores de eventos distintos. Para E2, el scanner exige la
+constante `MAX_PARALLEL_ATTEMPTS = 5`, su uso dentro de la misma llamada a
+`Array.from` que construye `attempts` y `Promise.all(attempts)` en la misma
+función. Esto solo acredita configuración estática contextual: cualquier
+afirmación de despliegue, ejecución o causalidad queda inválida. La validación
+es determinista y no sustituye la ejecución real aislada.
+
+El uso de `--experimental-transform-types` emite una advertencia de Node: es
+un workaround local, no evidencia de estabilidad de una API definitiva. El
+preflight no creó ni eliminó contenedores, no aplicó migraciones, no modificó
+la base PostgreSQL habitual ni ejecutó la evaluación completa de INC-001.

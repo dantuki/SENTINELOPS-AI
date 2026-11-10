@@ -952,7 +952,7 @@ async function main(): Promise<number> {
     const migrate = () =>
       {
         console.log(
-          runNodeSync(["--import=tsx", "src/migrate.ts"], migrationEnv, secrets),
+          runNodeSync(["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/migrate.ts"], migrationEnv, secrets),
         );
         throwIfTerminated();
       };
@@ -1007,7 +1007,7 @@ async function main(): Promise<number> {
     api = new ManagedProcess(
       "api",
       process.execPath,
-      ["--import=tsx", "src/server.ts"],
+      ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/server.ts"],
       { cwd: apiDirectory, env: buildApiEnvironment(database, endpoints) },
       secrets,
     );
@@ -1025,7 +1025,7 @@ async function main(): Promise<number> {
     evaluator = new ManagedProcess(
       "evaluator",
       process.execPath,
-      ["--import=tsx", "src/evaluate-inc001.ts", seeded.projectId],
+      ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/evaluate-inc001.ts", seeded.projectId],
       {
         cwd: apiDirectory,
         env: {
