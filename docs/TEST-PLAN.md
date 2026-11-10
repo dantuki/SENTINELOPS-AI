@@ -522,3 +522,41 @@ El uso de `--experimental-transform-types` emite una advertencia de Node: es
 un workaround local, no evidencia de estabilidad de una API definitiva. El
 preflight no creó ni eliminó contenedores, no aplicó migraciones, no modificó
 la base PostgreSQL habitual ni ejecutó la evaluación completa de INC-001.
+
+### Misión 04 — primera evaluación aislada real de INC-001 — 9 de noviembre de 2026
+
+Se ejecutaron dos evaluaciones reales con PostgreSQL temporal, Ollama local,
+ingesta, embeddings de 1024 dimensiones, recuperación, attestation V2,
+recomputación y reportes nuevos. Los resultados históricos se conservan en
+`reports/inc001-isolated/` y no se sustituyen por este registro.
+
+| Ejecución | Resultado verificable |
+|---|---|
+| `808c1ecbafdf62dddda89f00f3922190` | Falló en `investigation`: la llamada estructurada de chat agotó los 90 s (`HTTP 504`). La ingesta y los embeddings sí terminaron. Contenedor y volumen temporales se eliminaron; el reporte fue conservador y marcó el árbol API como `unknown`. |
+| `d68349dce5c9a99f60c5fb54f574bc16` | El evaluator terminó (exit 0) y el reporte V2 fue válido, pero la calidad falló (exit 1). Cleanup verificado: evaluator, API y orquestador detenidos; contenedor y volumen anónimo eliminados. |
+
+La segunda ejecución usó el puerto PostgreSQL temporal `50611`, no `5432`;
+el contenedor tuvo etiquetas de propiedad del runner y el volumen habitual
+`sentinelops-ai_postgres_data` permaneció presente. El contenedor habitual
+`sentinelops-ai-postgres-1` siguió saludable en `127.0.0.1:5432`.
+
+La primera ejecución demostró que los límites de 90 s del API y del
+orquestador no eran compatibles con la generación JSON local: el API agotó
+90.0 s y el orquestador 90.03 s. El runner aislado ahora inyecta límites
+acotados de 300 s para Ollama, 305 s para la investigación API y 310 s para
+la solicitud del evaluator; los valores por defecto de los servicios no se
+ampliaron. El cleanup Windows reintenta una sola vez la inspección CIM de
+descendientes y conserva `unknown` si tampoco puede demostrarla.
+
+En la segunda ejecución, el reporte `inc001-verified-v2` verificó
+procedencia, hashes y scope de las dos evidencias; `Retrieval Recall` fue
+`1.0`, no hubo filtración de referencia ni violaciones deterministas de
+factualidad. Sin embargo, `Answer Coverage` fue `1/6`; hubo 8 relaciones de
+cita válidas, 1 parcial y 2 inválidas. La respuesta omitió componentes
+requeridos (incluidos cero conexiones inactivas, HTTP 500, duración de 180 ms
+y el conjunto completo de la observación de saturación persistente) y su
+resumen afirmó causalidad no demostrada. El prompt ya pedía hechos atómicos,
+valores, ceros, duraciones y no afirmar causalidad por correlación; por tanto
+el fallo se atribuye a la salida real del modelo, no se corrige alterando el
+ground truth ni reduciendo el gate. No se realizó un tercer intento para
+seleccionar una salida favorable.

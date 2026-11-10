@@ -181,6 +181,15 @@ export class ManagedProcess {
     return this.stopPromise;
   }
 
+  private async inspectWindowsDescendants(pid: number): Promise<number[] | null> {
+    const initial = this.runtime.inspectWindowsDescendants(pid);
+    if (initial !== null) return initial;
+    // CIM can transiently fail while taskkill closes a process tree. Retry once
+    // without treating an unavailable inspection as a successful cleanup.
+    await this.runtime.wait(250);
+    return this.runtime.inspectWindowsDescendants(pid);
+  }
+
   private async stopProcess(): Promise<ProcessStopState> {
     const pid = this.child.pid;
     if (pid === undefined) {
@@ -196,7 +205,7 @@ export class ManagedProcess {
         if (!processClosed) {
           return "unknown";
         }
-        const descendants = this.runtime.inspectWindowsDescendants(pid);
+        const descendants = await this.inspectWindowsDescendants(pid);
         return descendants === null
           ? "unknown"
           : descendants.length === 0
@@ -211,7 +220,7 @@ export class ManagedProcess {
       if (taskkill.errorCode === "ETIMEDOUT" || !processClosed) {
         return "unknown";
       }
-      const descendants = this.runtime.inspectWindowsDescendants(pid);
+      const descendants = await this.inspectWindowsDescendants(pid);
       if (descendants === null) {
         return "unknown";
       }

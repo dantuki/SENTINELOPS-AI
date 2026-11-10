@@ -640,10 +640,14 @@ def test_generate_local_chat_rejects_a_token_limited_response(
         )
     )
 
+    def fake_client_factory(*, timeout: float) -> FakeOllamaAsyncClient:
+        mock_client.timeout = timeout
+        return mock_client
+
     monkeypatch.setattr(
         orchestrator.httpx,
         "AsyncClient",
-        lambda *, timeout: mock_client,
+        fake_client_factory,
     )
 
     with pytest.raises(LocalModelResponseError):
@@ -689,6 +693,35 @@ def test_generate_local_chat_requests_json_mode(
     assert model == "qwen3.5:4b"
     assert response == '{"summary":"Evidencia."}'
     assert mock_client.request_json["format"] == "json"
+
+
+def test_generate_local_chat_uses_a_bounded_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_client = FakeOllamaAsyncClient(
+        response=FakeOllamaResponse(
+            {
+                "model": "qwen3.5:4b",
+                "message": {"content": "Respuesta."},
+                "done": True,
+            }
+        )
+    )
+    monkeypatch.setenv("OLLAMA_CHAT_TIMEOUT_SECONDS", "300")
+
+    def fake_client_factory(*, timeout: float) -> FakeOllamaAsyncClient:
+        mock_client.timeout = timeout
+        return mock_client
+
+    monkeypatch.setattr(
+        orchestrator.httpx,
+        "AsyncClient",
+        fake_client_factory,
+    )
+
+    asyncio.run(orchestrator.generate_local_chat("Investiga INC-001."))
+
+    assert mock_client.timeout == 300.0
 
 
 def test_generate_local_chat_forwards_the_investigation_schema(

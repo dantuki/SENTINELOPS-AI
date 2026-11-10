@@ -26,6 +26,8 @@ const MAX_TEXT_CHARS = 20_000;
 const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 20;
 const MAX_INVESTIGATION_OUTPUT_TOKENS = 1536;
+const DEFAULT_CHAT_TIMEOUT_MS = 90_000;
+const MAX_CHAT_TIMEOUT_MS = 600_000;
 
 // Umbral experimental para búsquedas generales del proyecto.
 // Debe calibrarse con un conjunto de evaluación.
@@ -82,6 +84,14 @@ interface InvestigationRouteOptions {
 interface ParsedEmbedding {
   model: string;
   embedding: number[];
+}
+
+function configuredTimeoutMs(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1_000 && parsed <= MAX_CHAT_TIMEOUT_MS
+    ? parsed
+    : fallback;
 }
 
 const errorSchema = {
@@ -816,7 +826,11 @@ export function registerInvestigationRoutes(
     options.embeddingTimeoutMs ?? 45_000;
 
   const chatTimeoutMs =
-    options.chatTimeoutMs ?? 90_000;
+    options.chatTimeoutMs ??
+    configuredTimeoutMs(
+      process.env.AI_ORCHESTRATOR_INVESTIGATION_TIMEOUT_MS,
+      DEFAULT_CHAT_TIMEOUT_MS,
+    );
   // Tests deliberately use an in-memory adapter; server.ts always supplies PostgreSQL.
   const traceStore = options.traceStore ?? new MemoryRetrievalTraceStore();
 

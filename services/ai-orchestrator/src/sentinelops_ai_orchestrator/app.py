@@ -20,6 +20,24 @@ EMBEDDING_DIMENSIONS = 1024
 MAX_BATCH_SIZE = 32
 MAX_TEXT_CHARS = 20_000
 EMBEDDING_TIMEOUT_SECONDS = 30.0
+DEFAULT_CHAT_TIMEOUT_SECONDS = 90.0
+MAX_CHAT_TIMEOUT_SECONDS = 300.0
+
+
+def get_chat_timeout_seconds() -> float:
+    """Read a bounded per-process chat timeout without changing the default."""
+    configured = os.environ.get("OLLAMA_CHAT_TIMEOUT_SECONDS")
+    if configured is None:
+        return DEFAULT_CHAT_TIMEOUT_SECONDS
+    try:
+        timeout = float(configured)
+    except ValueError:
+        return DEFAULT_CHAT_TIMEOUT_SECONDS
+    return (
+        timeout
+        if 1.0 <= timeout <= MAX_CHAT_TIMEOUT_SECONDS
+        else DEFAULT_CHAT_TIMEOUT_SECONDS
+    )
 
 INVESTIGATION_ANALYSIS_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -694,7 +712,9 @@ async def generate_local_chat(
         ollama_request["format"] = response_schema or "json"
 
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(
+            timeout=get_chat_timeout_seconds()
+        ) as client:
             response = await client.post(
                 f"{base_url}/api/chat",
                 json=ollama_request,

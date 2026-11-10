@@ -511,6 +511,7 @@ function createWindowsProcessHarness(options: {
   taskkillStatus?: number | null;
   taskkillErrorCode?: string;
   descendants?: number[] | null;
+  descendantsSequence?: Array<number[] | null>;
   closeOnTaskkill?: boolean;
 } = {}): {
   managed: ManagedProcess;
@@ -534,6 +535,7 @@ function createWindowsProcessHarness(options: {
     },
   };
   const calls = { taskkillPids: [] as number[], inspectedPids: [] as number[] };
+  let descendantInspection = 0;
   const close = (code: number | null, signal: NodeJS.Signals | null = null) => {
     onExit?.(code, signal);
     onClose?.(code, signal);
@@ -553,6 +555,12 @@ function createWindowsProcessHarness(options: {
     },
     inspectWindowsDescendants(pid) {
       calls.inspectedPids.push(pid);
+      const sequence = options.descendantsSequence;
+      if (sequence) {
+        const value = sequence[Math.min(descendantInspection, sequence.length - 1)];
+        descendantInspection += 1;
+        return value ?? null;
+      }
       return options.descendants === undefined ? [] : options.descendants;
     },
     killProcessGroup() {
@@ -608,6 +616,14 @@ test("ManagedProcess.stop exercises Windows taskkill, close and descendant verif
     descendants: null,
   });
   assert.equal(await unavailableDescendants.managed.stop(), "unknown");
+  assert.deepEqual(unavailableDescendants.calls.inspectedPids, [4321, 4321]);
+
+  const transientDescendantInspection = createWindowsProcessHarness({
+    closeOnTaskkill: true,
+    descendantsSequence: [null, []],
+  });
+  assert.equal(await transientDescendantInspection.managed.stop(), "stopped");
+  assert.deepEqual(transientDescendantInspection.calls.inspectedPids, [4321, 4321]);
 
   const missingPid = createWindowsProcessHarness({ pid: null });
   assert.equal(await missingPid.managed.stop(), "unknown");
@@ -825,12 +841,14 @@ test("service environments never inherit habitual application variables", () => 
   assert.equal(api.SESSION_COOKIE_SECURE, "false");
   assert.equal(api.NODE_ENV, "development");
   assert.equal(api.AI_ORCHESTRATOR_URL, "http://127.0.0.1:49201");
+  assert.equal(api.AI_ORCHESTRATOR_INVESTIGATION_TIMEOUT_MS, "305000");
   assert.equal(api.OPENAI_API_KEY, undefined);
 
   const orchestrator = buildOrchestratorEnvironment(endpoints, hostEnvironment);
   assert.equal(orchestrator.SENTINELOPS_ENV, "development");
   assert.equal(orchestrator.OLLAMA_CHAT_MODEL, "qwen3.5:4b");
   assert.equal(orchestrator.OLLAMA_EMBEDDING_MODEL, "qwen3-embedding:0.6b");
+  assert.equal(orchestrator.OLLAMA_CHAT_TIMEOUT_SECONDS, "300");
   assert.equal(orchestrator.POSTGRES_PASSWORD, undefined);
   assert.equal(orchestrator.OPENAI_API_KEY, undefined);
 

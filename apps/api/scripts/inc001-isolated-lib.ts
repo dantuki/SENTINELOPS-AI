@@ -40,6 +40,11 @@ export const ORCHESTRATOR_CHAT_MODEL = "qwen3.5:4b";
 export const ORCHESTRATOR_EMBEDDING_MODEL = "qwen3-embedding:0.6b";
 export const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 export const APP_ORIGIN = "http://127.0.0.1:3000";
+// The isolated runner has a 12-minute outer deadline. These bounded nested
+// deadlines leave time for one local structured response and orderly cleanup.
+export const ISOLATED_CHAT_TIMEOUT_SECONDS = 300;
+export const ISOLATED_INVESTIGATION_TIMEOUT_MS = 305_000;
+export const ISOLATED_EVALUATION_REQUEST_TIMEOUT_MS = 310_000;
 
 const DATABASE_PATTERN = /^sentinelops_inc001_eval_\d+$/u;
 const RUN_ID_PATTERN = /^[0-9a-f]{32}$/u;
@@ -322,6 +327,7 @@ export function buildApiEnvironment(
     APP_ORIGIN,
     AI_ORCHESTRATOR_URL: `http://127.0.0.1:${endpoints.orchestratorPort}`,
     AI_ORCHESTRATOR_API_KEY: endpoints.serviceKey,
+    AI_ORCHESTRATOR_INVESTIGATION_TIMEOUT_MS: String(ISOLATED_INVESTIGATION_TIMEOUT_MS),
   };
 }
 
@@ -335,6 +341,7 @@ export function buildOrchestratorEnvironment(
     OLLAMA_BASE_URL: OLLAMA_BASE_URL,
     OLLAMA_CHAT_MODEL: ORCHESTRATOR_CHAT_MODEL,
     OLLAMA_EMBEDDING_MODEL: ORCHESTRATOR_EMBEDDING_MODEL,
+    OLLAMA_CHAT_TIMEOUT_SECONDS: String(ISOLATED_CHAT_TIMEOUT_SECONDS),
     AI_ORCHESTRATOR_API_KEY: endpoints.serviceKey,
     PYTHONUNBUFFERED: "1",
     PYTHONDONTWRITEBYTECODE: "1",
@@ -354,6 +361,7 @@ export function buildEvaluatorEnvironment(
     AI_ORCHESTRATOR_API_KEY: endpoints.serviceKey,
     SENTINELOPS_EVAL_EMAIL: credentials.email,
     SENTINELOPS_EVAL_PASSWORD: credentials.password,
+    SENTINELOPS_EVAL_REQUEST_TIMEOUT_MS: String(ISOLATED_EVALUATION_REQUEST_TIMEOUT_MS),
   };
 }
 

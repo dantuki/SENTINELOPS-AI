@@ -42,6 +42,15 @@ type EvaluationStage =
   | "evaluation";
 
 let currentStage: EvaluationStage = "arguments";
+const DEFAULT_EVALUATION_REQUEST_TIMEOUT_MS = 120_000;
+const MAX_EVALUATION_REQUEST_TIMEOUT_MS = 600_000;
+
+function evaluationRequestTimeoutMs(): number {
+  const configured = Number(process.env.SENTINELOPS_EVAL_REQUEST_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured >= 1_000 && configured <= MAX_EVALUATION_REQUEST_TIMEOUT_MS
+    ? configured
+    : DEFAULT_EVALUATION_REQUEST_TIMEOUT_MS;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -261,7 +270,7 @@ async function postJson(
       ...(traceRunId ? { "x-sentinelops-run-id": traceRunId } : {}),
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(evaluationRequestTimeoutMs()),
   });
 
   if (!response.ok) {
