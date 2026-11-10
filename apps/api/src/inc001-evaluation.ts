@@ -356,6 +356,25 @@ const contradictionPatterns: Record<string, RegExp> = {
   "OBS-06": /payment-gateway[\s\S]{0,100}(?:status_code["'\s:=]+(?!200\b)\d{3}|http\s*(?!200\b)\d{3}|duration_ms["'\s:=]+(?!180\b)\d+|\b(?!180\b)\d+\s*ms)/iu,
 };
 
+function matchesVerifiedObservation(
+  observationId: string,
+  text: string,
+  pattern: RegExp,
+): boolean {
+  if (observationId !== "OBS-05") {
+    return pattern.test(text);
+  }
+  return text.split(/\r?\n/u).some((line) =>
+    pattern.test(line) &&
+    !/\b(?:no|not|never)\b/iu.test(line) &&
+    /\b(?:persist\w*|permaneci[oó]|permanec\w*)\b/iu.test(line) &&
+    /\b(?:pool|saturaci[oó]n|saturation)\b/iu.test(line) &&
+    /(?:active_connections["'\s:=]+20\b|20\s+(?:conexiones\s+activas|active\s+connections))/iu.test(line) &&
+    /(?:idle_connections["'\s:=]+0\b|(?:0|cero|ninguna)\s+(?:conexiones\s+)?(?:inactivas|libres)|(?:0|zero)\s+idle\s+connections)/iu.test(line) &&
+    /(?:waiting_requests["'\s:=]+31\b|31\s+(?:solicitudes\s+(?:en espera|esperando|pendientes)|waiting\s+requests))/iu.test(line),
+  );
+}
+
 export function evaluateInc001VerifiedClaims(
   response: string,
   analysis: InvestigationAnalysis,
@@ -395,14 +414,14 @@ export function evaluateInc001VerifiedClaims(
         provenanceById.get(item.evidenceId) === "verified" &&
         item.evidenceScope === "incident_specific" &&
         item.incidentId === "INC-001" &&
-        pattern.test(item.content),
+        matchesVerifiedObservation(observationId, item.content, pattern),
     );
     if (verifiedEvidence.length > 0) {
       retrievedObservationIds.push(observationId);
     }
 
     const matchingClaims = claims.filter(
-      ({ text }) => pattern.test(text) || partialPattern.test(text),
+      ({ text }) => matchesVerifiedObservation(observationId, text, pattern) || partialPattern.test(text),
     );
     if (matchingClaims.length === 0) {
       mappings.push({
@@ -424,7 +443,7 @@ export function evaluateInc001VerifiedClaims(
         .filter((item): item is EvidenceManifestItem => item !== undefined);
       const relevantEvidence = referencedEvidence.filter(
         (item) =>
-          pattern.test(item.content) &&
+          matchesVerifiedObservation(observationId, item.content, pattern) &&
           item.evidenceScope === "incident_specific" &&
           item.incidentId === "INC-001",
       );
@@ -448,7 +467,7 @@ export function evaluateInc001VerifiedClaims(
             : "unverified";
       const supportStatus: ClaimSupportStatus = contradicted
         ? "contradicted"
-        : verifiedRelevantEvidence.length > 0 && pattern.test(claim.text)
+        : verifiedRelevantEvidence.length > 0 && matchesVerifiedObservation(observationId, claim.text, pattern)
           ? "supported"
           : uncertainRelevantEvidence.length > 0
             ? "unverified"
@@ -499,8 +518,8 @@ export function evaluateInc001VerifiedClaims(
         mapping.evidenceRefs.includes(ref) &&
         pattern !== undefined &&
         mapping.claimText !== null &&
-        pattern.test(mapping.claimText) &&
-        pattern.test(evidence.content) &&
+        matchesVerifiedObservation(mapping.observationId, mapping.claimText, pattern) &&
+        matchesVerifiedObservation(mapping.observationId, evidence.content, pattern) &&
         evidence.evidenceScope === "incident_specific" &&
         evidence.incidentId === "INC-001" &&
         provenanceById.get(evidence.evidenceId) === "verified"

@@ -749,6 +749,7 @@ function isTraceVerificationReport(value: unknown): value is TraceVerificationRe
     ["verified", "unverified", "failed"].includes(String(value.status)) &&
     Number.isInteger(value.verifiedCount) &&
     Number.isInteger(value.unverifiedCount) &&
+    typeof value.failedCount === "number" &&
     Number.isInteger(value.failedCount) &&
     isStringArray(value.verificationErrors) &&
     isStringArray(value.verifiedEvidenceIds) &&
@@ -982,8 +983,8 @@ export function summarizeEvaluationOutput(
       passed: parsed && isRecord(value) && typeof value.passed === "boolean"
         ? value.passed
         : null,
-      model: parsed && typeof value.model === "string" ? value.model : null,
-      timings: parsed ? value.timings : null,
+      model: parsed && isRecord(value) && typeof value.model === "string" ? value.model : null,
+      timings: parsed && isRecord(value) ? value.timings : null,
       validationErrors: parsed ? [] : ["invalid or incomplete verified evaluation report"],
     };
   } catch {

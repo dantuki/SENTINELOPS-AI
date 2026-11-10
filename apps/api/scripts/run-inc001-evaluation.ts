@@ -1045,7 +1045,7 @@ async function main(): Promise<number> {
         kind: "orchestrator" as const,
         code: null,
       })),
-      delay(EVALUATION_TIMEOUT_MS).then(() => ({
+      delay(EVALUATION_TIMEOUT_MS, undefined, { ref: false }).then(() => ({
         kind: "timeout" as const,
         code: null,
       })),

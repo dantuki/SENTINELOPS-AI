@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { extractInc001JsonlEvents } from "../scripts/inc001-jsonl-events.js";
 import {
   HABITUAL_VOLUME_NAME,
   POSTGRES_IMAGE,
@@ -39,6 +41,7 @@ import {
 import {
   RetrievalTraceVerifier,
   type RetrievalTraceExpectation,
+  type TraceVerificationReport,
 } from "../src/retrieval-trace-verifier.js";
 import type { Pool } from "pg";
 import {
@@ -217,6 +220,22 @@ test("Docker inspect distinguishes absent, unavailable, timeout and unknown", ()
       stderr: "Error: No such object: container-id",
     }),
     "ABSENT",
+  );
+  assert.equal(
+    classifyDockerInspect({
+      status: 1,
+      stdout: "[]",
+      stderr: `Error response from daemon: get ${"a".repeat(64)}: no such volume`,
+    }),
+    "ABSENT",
+  );
+  assert.equal(
+    classifyDockerInspect({
+      status: 1,
+      stdout: "",
+      stderr: "permission denied while checking no such volume",
+    }),
+    "UNKNOWN",
   );
   assert.equal(
     classifyDockerInspect({
@@ -878,10 +897,10 @@ const traceSourceId = "66666666-6666-4666-8666-666666666666";
 const traceRetrievedAt = "2026-01-01T00:00:00.000Z";
 const evaluationContent = [
       '{"request_id":"req-7841","attempts":5,"retry_mode":"parallel"}',
-      '{"active_connections":20,"idle_connections":0,"waiting_requests":18}',
-      '{"status_code":500,"error":"Timeout acquiring a connection","request_id":"req-7841"}',
+      '{"active_connections":20,"max_connections":20,"idle_connections":0,"waiting_requests":18}',
+      '{"method":"POST","path":"/api/orders","status_code":500,"error":"Timeout acquiring a connection","request_id":"req-7841"}',
       '{"queue_depth":42,"retries_started_last_minute":120}',
-      '{"active_connections":20,"waiting_requests":31}',
+      '{"event":"connection_pool_saturated","active_connections":20,"idle_connections":0,"waiting_requests":31,"message":"Connection pool saturation persisted"}',
       '{"service":"payment-gateway","status_code":200,"duration_ms":180}',
 ].join("\n");
 const completeAnalysis = {
@@ -890,9 +909,9 @@ const completeAnalysis = {
   observed_facts: [
     { claim: "Cinco intentos paralelos comparten req-7841.", evidence_refs: ["E1"] },
     { claim: "El pool llegó al máximo (20/20), con cero conexiones libres y 18 solicitudes esperando.", evidence_refs: ["E1"] },
-    { claim: "req-7841 agotó el tiempo de espera al adquirir conexión y recibió HTTP 500.", evidence_refs: ["E1"] },
-    { claim: "La cola de reintentos alcanzó 42, con 120 reintentos iniciados por minuto.", evidence_refs: ["E1"] },
-    { claim: "La saturación persistió y llegó a 31 solicitudes pendientes.", evidence_refs: ["E1"] },
+    { claim: "POST /api/orders con req-7841 agotó el tiempo de espera al adquirir conexión y recibió HTTP 500.", evidence_refs: ["E1"] },
+    { claim: "La cola de reintentos alcanzó 42, con 120 reintentos iniciados durante el último minuto.", evidence_refs: ["E1"] },
+    { claim: "El pool permaneció saturado con 20 conexiones activas, cero inactivas y 31 solicitudes esperando.", evidence_refs: ["E1"] },
     { claim: "payment-gateway registró HTTP 200 en 180 ms.", evidence_refs: ["E1"] },
   ],
   hypotheses: [],
@@ -931,6 +950,101 @@ const verifiedTrace = {
   runId: traceRunId,
   evidence: [{ evidenceId: traceChunkId, status: "verified" as const }],
 };
+
+const extractionContext = {
+  runId: traceRunId,
+  retrievalRequestId: traceRequestId,
+  projectId: traceProjectId,
+  incidentId: "INC-001",
+  retrievedAt: traceRetrievedAt,
+};
+
+function extractionItem(content: string): EvidenceManifestItem {
+  return { ...evaluationManifest[0]!, content, contentHash: hashChunkContent(content) };
+}
+
+test("JSONL extraction preserves real event context and chunk-relative lineage", () => {
+  const content = readFileSync(
+    new URL("../../../datasets/demo-pedidos-api/incident-001/observed-logs.jsonl", import.meta.url),
+    "utf8",
+  );
+  const result = extractInc001JsonlEvents(extractionItem(content), verifiedTrace, extractionContext);
+  assert.equal(result.events.length, 8);
+  assert.deepEqual(result.issues, []);
+  const scheduled = result.events.find((event) => event.event === "parallel_attempts_scheduled");
+  assert.equal(scheduled?.incidentRequestId, "req-7841");
+  assert.equal(scheduled?.timestamp, "2026-10-20T14:03:11Z");
+  assert.equal(scheduled?.fields.attempts, 5);
+  assert.equal(scheduled?.documentId, traceDocumentId);
+  assert.equal(scheduled?.sourceId, traceSourceId);
+  assert.equal(content.slice(scheduled!.startOffset, scheduled!.endOffset), JSON.stringify(scheduled!.fields));
+  const simultaneous = result.events.filter((event) => event.timestamp === "2026-10-20T14:03:14Z");
+  assert.equal(simultaneous.length, 2);
+  assert.notEqual(simultaneous[0]!.id, simultaneous[1]!.id);
+  assert.deepEqual(simultaneous.map((event) => event.service), ["pedidos-api", "payment-gateway"]);
+});
+
+test("JSONL extraction records malformed, incomplete and cross-incident lines without combining them", () => {
+  const content = [
+    '{"incident_id":"INC-001","event":"ok","request_id":"req-7841"}',
+    '{"incident_id":"INC-001","event":',
+    '{"incident_id":"INC-002","event":"other"}',
+    '[]',
+    '{"incident_id":"INC-001","timestamp":"not-a-date"}',
+  ].join("\n");
+  const result = extractInc001JsonlEvents(extractionItem(content), verifiedTrace, extractionContext);
+  assert.equal(result.events.length, 1);
+  assert.deepEqual(result.issues.map(({ reason }) => reason), [
+    "invalid_or_incomplete_json",
+    "incident_mismatch_or_missing",
+    "record_not_object",
+    "invalid_context_field",
+  ]);
+});
+
+test("JSONL event identities retain repeated records at different positions", () => {
+  const line = '{"incident_id":"INC-001","event":"repeated"}';
+  const result = extractInc001JsonlEvents(extractionItem(`${line}\n${line}`), verifiedTrace, extractionContext);
+  assert.equal(result.events.length, 2);
+  assert.equal(result.events[0]!.contentHash, result.events[1]!.contentHash);
+  assert.notEqual(result.events[0]!.id, result.events[1]!.id);
+});
+
+test("JSONL extraction does not reconstruct a record split across fragments", () => {
+  const left = extractionItem('{"incident_id":"INC-001","event":');
+  const right = extractionItem('"connection_pool_saturated","active_connections":20}');
+  for (const fragment of [left, right]) {
+    const result = extractInc001JsonlEvents(fragment, verifiedTrace, extractionContext);
+    assert.equal(result.events.length, 0);
+    assert.equal(result.issues[0]?.reason, "invalid_or_incomplete_json");
+  }
+});
+
+test("JSONL extraction refuses unverified or mismatched evidence context", () => {
+  const item = extractionItem('{"incident_id":"INC-001","event":"test"}');
+  for (const altered of [
+    { ...item, projectId: "77777777-7777-4777-8777-777777777777" },
+    { ...item, requestId: "77777777-7777-4777-8777-777777777777" },
+    { ...item, runId: "77777777-7777-4777-8777-777777777777" },
+    { ...item, incidentId: "INC-002" },
+    { ...item, evidenceScope: "project_context" as const },
+    { ...item, content: `${item.content} ` },
+  ]) {
+    assert.throws(() => extractInc001JsonlEvents(altered, verifiedTrace, extractionContext), /verified/u);
+  }
+  assert.throws(
+    () => extractInc001JsonlEvents(item, { ...verifiedTrace, status: "failed" }, extractionContext),
+    /verified/u,
+  );
+  assert.throws(
+    () => extractInc001JsonlEvents(
+      item,
+      { ...verifiedTrace, evidence: [{ evidenceId: traceChunkId, status: "unverified" }] },
+      extractionContext,
+    ),
+    /verified/u,
+  );
+});
 
 function createVerifierPool(
   rows: Record<string, unknown>[],
@@ -1132,7 +1246,7 @@ function candidateEvaluationReport(
 
 function validEvaluationReport(
   candidate: Record<string, unknown> = candidateEvaluationReport(),
-  verification = verifiedTrace,
+  verification: TraceVerificationReport = verifiedTrace,
 ): Record<string, unknown> {
   return JSON.parse(
     finalizeEvaluationOutput(
@@ -1218,6 +1332,52 @@ test("runner recomputes claim coverage and evidence leakage from the verified ma
   assert.equal(summarizedReport(leaked).parsed, true);
   assert.equal(leaked.passed, false);
   assert.equal(leaked.referenceLeaked, true);
+});
+
+test("OBS-05 is not covered by persistent saturation and 31 waiting alone", () => {
+  for (const claim of [
+    "El pool permaneció saturado con 31 solicitudes esperando.",
+    "El pool permaneció saturado con 20 conexiones activas y 31 solicitudes esperando.",
+    "El pool permaneció saturado con cero inactivas y 31 solicitudes esperando.",
+    "El pool tenía 20 conexiones activas, cero inactivas y 31 solicitudes esperando.",
+    "El pool no permaneció saturado con 20 conexiones activas, cero inactivas y 31 solicitudes esperando.",
+  ]) {
+    const incompleteAnalysis = {
+      ...completeAnalysis,
+      observed_facts: completeAnalysis.observed_facts.map((fact, index) =>
+        index === 4 ? { ...fact, claim } : fact,
+      ),
+    };
+    const report = validEvaluationReport(
+      candidateEvaluationReport({
+        response: renderInvestigationAnalysis(incompleteAnalysis),
+        analysis: incompleteAnalysis,
+      }),
+    );
+    const evaluation = report.evaluation as {
+      responseObservationIds: string[];
+    };
+    assert.equal(evaluation.responseObservationIds.includes("OBS-05"), false, claim);
+    assert.equal(report.passed, false, claim);
+  }
+});
+
+test("OBS-05 retrieval requires all components in the same evidence event", () => {
+  const content = evaluationContent.replace(
+    '"idle_connections":0,"waiting_requests":31',
+    '"waiting_requests":31',
+  );
+  const incompleteManifest = evaluationManifest.map((item) => ({
+    ...item,
+    content,
+    contentHash: hashChunkContent(content),
+  }));
+  const report = validEvaluationReport(
+    candidateEvaluationReport({ evidenceManifest: incompleteManifest }),
+  );
+  const evaluation = report.evaluation as { retrievedObservationIds: string[] };
+  assert.equal(evaluation.retrievedObservationIds.includes("OBS-05"), false);
+  assert.equal(report.passed, false);
 });
 
 test("verified report integrity rejects altered output and requires a verified trace", () => {

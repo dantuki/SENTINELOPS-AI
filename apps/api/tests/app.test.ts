@@ -8,6 +8,7 @@ import {
   diagnoseInvestigationResponse,
   registerInvestigationRoutes,
 } from "../src/investigation-routes.js";
+import { renderInvestigationAnalysis } from "../src/investigation-analysis.js";
 import { buildApp } from "../src/app.js";
 import type {
   ChunkEmbeddingInput,
@@ -240,6 +241,35 @@ test("investigation contract diagnostics identify unsupported IDs and semantic e
         code === "identifier_not_recognized",
     ),
   );
+});
+
+test("hypothesis statuses enforce evidence relationships", () => {
+  const cases: Array<{
+    status: string;
+    supporting: string[];
+    contradicting: string[];
+    valid: boolean;
+  }> = [
+    { status: "supported_unconfirmed", supporting: ["E1"], contradicting: [], valid: true },
+    { status: "supported_unconfirmed", supporting: [], contradicting: [], valid: false },
+    { status: "contradicted", supporting: [], contradicting: ["E1"], valid: true },
+    { status: "contradicted", supporting: [], contradicting: [], valid: false },
+    { status: "unverified", supporting: [], contradicting: [], valid: true },
+    { status: "unverified", supporting: ["E1"], contradicting: [], valid: false },
+    { status: "unverified", supporting: [], contradicting: ["E1"], valid: false },
+    { status: "insufficient_evidence", supporting: ["E1"], contradicting: [], valid: true },
+    { status: "insufficient_evidence", supporting: [], contradicting: [], valid: true },
+    { status: "supported_unconfirmed", supporting: ["E2"], contradicting: [], valid: false },
+  ];
+  for (const item of cases) {
+    const analysis = JSON.parse(structuredInvestigationResponse(["E1"], "Resumen.", [{
+      statement: "Hipótesis de prueba.",
+      status: item.status,
+      supporting_evidence: item.supporting,
+      contradicting_evidence: item.contradicting,
+    }])) as unknown;
+    assert.equal(diagnoseAnalysis(analysis).length === 0, item.valid, JSON.stringify(item));
+  }
 });
 
 function structuredInvestigationResponse(
@@ -1945,6 +1975,79 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
         response: structuredInvestigationResponse(),
       });
     },
+  });
+
+  test("investigation preserves a valid 395-word response without regenerating", async () => {
+    const analysis = {
+      summary: "dato",
+      summary_evidence_refs: ["E1"],
+      observed_facts: [{ claim: "Observación registrada.", evidence_refs: ["E1"] }],
+      hypotheses: [],
+      missing_information: [],
+      next_checks: [],
+      limitations: [],
+    };
+    const initialWords = renderInvestigationAnalysis(analysis).trim().split(/\s+/u).length;
+    analysis.summary = Array(396 - initialWords).fill("dato").join(" ");
+    assert.equal(renderInvestigationAnalysis(analysis).trim().split(/\s+/u).length, 395);
+    let chatCalls = 0;
+    let prompt = "";
+    const app = createTestApp();
+    registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input, init) => {
+        if (String(input).endsWith("/embeddings")) {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+        chatCalls += 1;
+        const body = JSON.parse(String(init?.body)) as { prompt: string };
+        prompt = body.prompt;
+        return Response.json({ model: "test-model", response: JSON.stringify(analysis) });
+      },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/projects/${sourceTestProjectId}/investigate`,
+      payload: { question: "Investiga este incidente." },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(chatCalls, 1);
+    assert.deepEqual(response.json().data.analysis, analysis);
+    assert.equal(response.json().data.response, renderInvestigationAnalysis(analysis));
+    assert.match(prompt, /unverified requiere supporting_evidence y contradicting_evidence vacíos/u);
+  });
+
+  test("investigation rejects an unverified hypothesis with references on the first response", async () => {
+    let chatCalls = 0;
+    const app = createTestApp();
+    registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+      aiOrchestratorUrl: "http://127.0.0.1:8001",
+      fetchImpl: async (input) => {
+        if (String(input).endsWith("/embeddings")) {
+          return Response.json(fakeEmbeddingPayload(1));
+        }
+        chatCalls += 1;
+        return Response.json({
+          model: "test-model",
+          response: structuredInvestigationResponse(["E1"], "Resumen.", [{
+            statement: "Una hipótesis.",
+            status: "unverified",
+            supporting_evidence: ["E1"],
+            contradicting_evidence: [],
+          }]),
+        });
+      },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/projects/${sourceTestProjectId}/investigate`,
+      payload: { question: "Investiga este incidente." },
+    });
+    assert.equal(response.statusCode, 502);
+    assert.equal(chatCalls, 1);
+    assert.deepEqual(response.json(), {
+      error: "AI model response did not satisfy the structured contract",
+    });
   });
 
   const response = await app.inject({

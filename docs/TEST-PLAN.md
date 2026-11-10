@@ -459,3 +459,19 @@ La cobertura unitaria/de adaptadores incluye inserción atómica de trazas y rol
 | `test:postgres`, migraciones 001–008, runner aislado y evaluación INC-001 | No ejecutados |
 
 La migración 008 y el runner de integración PostgreSQL incluyen ahora las tablas de trazas de recuperación, pero en esta validación no se aplicó ni ejercitó la migración. Aún requieren pruebas los casos de traza ausente, lineage entre proyectos distintos, documento no indexado, fuente inactiva, rechazo de evidencias de otros incidentes/ámbito de contexto del proyecto y relevancia adversarial de citas. Antes de aprobar el Reliability Gate siguen siendo obligatorios una ejecución de migraciones e integración en PostgreSQL temporal, una inferencia de Ollama, la evaluación INC-001 aislada y la verificación de limpieza. En esta validación no se accedió a la base PostgreSQL habitual ni a su volumen.
+
+### Correcciones del contrato de investigación
+
+Las investigaciones válidas ya no se regeneran por superar 220 palabras; el número de palabras se sigue registrando sin registrar el texto del modelo. El prompt indica las relaciones entre estados de hipótesis y referencias, que el backend sigue validando. El esquema compartido no incorpora condicionales cuya compatibilidad con el proveedor no se haya verificado.
+
+El comando `npm.cmd run typecheck:runner --workspace=@sentinelops/api` comprueba el runner y sus pruebas con `strict`. La reconstrucción del evaluador de claims y citas permanece pendiente: sus reglas actuales no componen hechos atómicos y pueden clasificar incorrectamente la relevancia de E2. Las correcciones del contrato y de tipos no cierran INC-001 ni el Reliability Gate.
+
+### Regresión parcial de OBS-05
+
+En el flujo de reporte verificado, OBS-05 ya no cuenta como completa cuando faltan la persistencia, las 20 conexiones activas, las cero inactivas o las 31 solicitudes esperando; la prueba también comprueba que las mediciones de otro evento no completen el evento de 31 solicitudes. Esta comprobación conservadora exige actualmente que los componentes figuren en una sola línea de evidencia y en un solo claim, por lo que puede producir falsos negativos y aún no implementa la composición de claims atómicos. No demuestra una evaluación semántica general ni corrige las demás observaciones, las citas de hipótesis, E2 o las afirmaciones adicionales. Los tests del verificador utilizan datos simulados; no constituyen una nueva evaluación real ni aprueban INC-001.
+
+### Base parcial para el evaluador V2
+
+El extractor independiente de JSONL registra candidatos completos con identidad, hash y posiciones relativas al fragmento; informa líneas inválidas, incompletas o de otro incidente. No reconstruye registros entre fragmentos ni identifica por sí mismo el formato del documento. El reporte de verificación V1 solo vincula el estado al ID de evidencia, no a un hash en su resultado: el llamador debe conservar exactamente el manifiesto verificado. Las pruebas usan el dataset local y una traza simulada. El extractor todavía no está conectado al runner ni modifica métricas, contratos o aceptación; no existe aún un reporte V2.
+
+Los offsets y metadatos actuales en PostgreSQL no son un snapshot de lo existente durante la recuperación. Para verificar históricamente esas propiedades se necesitaría, como propuesta aún no implementada, un almacenamiento aditivo de snapshot ligado a cada elemento de traza y su verificación, con pruebas de cambios posteriores, linaje, hash y compatibilidad histórica. Consultar los valores actuales no demuestra su estado histórico. No se modificó ninguna migración.

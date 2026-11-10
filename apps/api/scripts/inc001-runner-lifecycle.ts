@@ -37,7 +37,12 @@ export function classifyDockerInspect(
   }
 
   const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
-  if (/no such (?:object|container|volume):/u.test(message)) {
+  if (
+    /no such (?:object|container|volume):/u.test(message) ||
+    /^error response from daemon: get [^\r\n:]+: no such volume\s*$/mu.test(
+      message,
+    )
+  ) {
     return "ABSENT";
   }
   if (
