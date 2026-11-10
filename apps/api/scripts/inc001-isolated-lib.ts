@@ -3,11 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import type { TerminationReason } from "./inc001-runner-lifecycle.js";
 import {
   containsEvaluationReference,
-  evaluateInc001VerifiedClaims,
-  isInc001VerifiedEvaluationAccepted,
   type Inc001Evidence,
   type Inc001GroundTruth,
 } from "../src/inc001-evaluation.js";
+import { evaluateInc001V2 } from "./inc001-evaluator-v2.js";
 import {
   renderInvestigationAnalysis,
   type InvestigationAnalysis,
@@ -759,7 +758,8 @@ function isTraceVerificationReport(value: unknown): value is TraceVerificationRe
     value.evidence.every(
       (item) =>
         isRecord(item) &&
-        hasExactKeys(item, ["evidenceId", "status"]) &&
+        Object.keys(item).every((key) => key === "evidenceId" || key === "status" || key === "attestation") &&
+        Object.keys(item).length >= 2 &&
         isUuid(item.evidenceId) &&
         ["verified", "unverified", "failed"].includes(String(item.status)),
     )
@@ -802,13 +802,13 @@ function createVerifiedReport(
   traceVerification: TraceVerificationReport,
   groundTruth: Inc001GroundTruth,
 ): Record<string, unknown> {
-  const evaluation = evaluateInc001VerifiedClaims(
-    candidate.response,
-    candidate.analysis,
-    candidate.evidenceManifest,
-    traceVerification.evidence,
+  const evaluation = evaluateInc001V2({
+    response: candidate.response,
+    analysis: candidate.analysis,
+    manifest: candidate.evidenceManifest,
+    trace: traceVerification,
     groundTruth,
-  );
+  });
   const evidence = candidate.evidenceManifest.map<Inc001Evidence>((item) => ({
     id: item.chunkId,
     content: item.content,
@@ -819,15 +819,12 @@ function createVerifiedReport(
   const abstained = candidate.model === "not-invoked" || evidence.length === 0;
   const passed =
     traceVerification.status === "verified" &&
-    isInc001VerifiedEvaluationAccepted(
-      candidate.model,
-      candidate.evidenceManifest,
-      evaluation,
-      referenceLeaked,
-    );
+    candidate.model !== "not-invoked" &&
+    !referenceLeaked &&
+    evaluation.accepted;
   return {
     ...candidate,
-    reportType: "inc001-verified-v1",
+    reportType: "inc001-verified-v2",
     abstained,
     referenceLeaked,
     traceVerification,
@@ -929,7 +926,7 @@ export function summarizeEvaluationOutput(
     const parsed =
       isRecord(value) &&
       hasExactKeys(value, VERIFIED_REPORT_KEYS) &&
-      value.reportType === "inc001-verified-v1" &&
+      value.reportType === "inc001-verified-v2" &&
       typeof value.runId === "string" &&
       isUuid(value.runId) &&
       isTraceVerificationReport(value.traceVerification) &&

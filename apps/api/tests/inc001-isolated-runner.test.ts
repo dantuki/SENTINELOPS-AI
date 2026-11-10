@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { extractInc001JsonlEvents } from "../scripts/inc001-jsonl-events.js";
+import { evaluateInc001V2 } from "../scripts/inc001-evaluator-v2.js";
 import {
   HABITUAL_VOLUME_NAME,
   POSTGRES_IMAGE,
@@ -896,12 +897,12 @@ const traceDocumentId = "55555555-5555-4555-8555-555555555555";
 const traceSourceId = "66666666-6666-4666-8666-666666666666";
 const traceRetrievedAt = "2026-01-01T00:00:00.000Z";
 const evaluationContent = [
-      '{"request_id":"req-7841","attempts":5,"retry_mode":"parallel"}',
-      '{"active_connections":20,"max_connections":20,"idle_connections":0,"waiting_requests":18}',
-      '{"method":"POST","path":"/api/orders","status_code":500,"error":"Timeout acquiring a connection","request_id":"req-7841"}',
-      '{"queue_depth":42,"retries_started_last_minute":120}',
-      '{"event":"connection_pool_saturated","active_connections":20,"idle_connections":0,"waiting_requests":31,"message":"Connection pool saturation persisted"}',
-      '{"service":"payment-gateway","status_code":200,"duration_ms":180}',
+      '{"incident_id":"INC-001","event":"parallel_attempts_scheduled","request_id":"req-7841","operation":"create_order","attempts":5,"retry_mode":"parallel"}',
+      '{"incident_id":"INC-001","event":"connection_pool_saturated","active_connections":20,"max_connections":20,"idle_connections":0,"waiting_requests":18}',
+      '{"incident_id":"INC-001","event":"request_failed","method":"POST","path":"/api/orders","status_code":500,"error":"Timeout acquiring a connection from the PostgreSQL pool","request_id":"req-7841"}',
+      '{"incident_id":"INC-001","event":"retry_queue_growing","queue_depth":42,"retries_started_last_minute":120}',
+      '{"incident_id":"INC-001","event":"connection_pool_saturated","active_connections":20,"idle_connections":0,"waiting_requests":31,"message":"Connection pool saturation persisted"}',
+      '{"incident_id":"INC-001","event":"payment_request_completed","service":"payment-gateway","status_code":200,"duration_ms":180}',
 ].join("\n");
 const completeAnalysis = {
   summary: "Cinco intentos paralelos comparten req-7841.",
@@ -948,7 +949,24 @@ const verifiedTrace = {
   verifiedEvidenceIds: [traceChunkId],
   requestId: traceRequestId,
   runId: traceRunId,
-  evidence: [{ evidenceId: traceChunkId, status: "verified" as const }],
+  evidence: [{
+    evidenceId: traceChunkId,
+    status: "verified" as const,
+    attestation: {
+      evidenceId: traceChunkId, chunkId: traceChunkId, documentId: traceDocumentId,
+      sourceId: traceSourceId, projectId: traceProjectId, runId: traceRunId,
+      retrievalRequestId: traceRequestId, requestedIncidentId: "INC-001",
+      rank: 1, ordinal: 0, expectedContentHash: hashChunkContent(evaluationContent),
+      storedContentHash: hashChunkContent(evaluationContent), recomputedContentHash: hashChunkContent(evaluationContent),
+      contentMatchesManifest: true, hashesMatch: true, documentMatchesSource: true,
+      projectMatches: true, documentStatus: "indexed", sourceStatus: "active",
+      evidenceScope: "incident_specific", metadata: {
+        documentTitle: "observed-logs.jsonl", mediaType: "application/x-ndjson",
+        sourceDocumentKey: "incident-001/observed-logs.jsonl", sourceType: "log_bundle",
+        chunkStartOffset: 0, chunkEndOffset: evaluationContent.length, chunkMetadata: { incidentId: "INC-001" }, documentMetadata: {}, sourceMetadata: {},
+      }, errors: [],
+    },
+  }],
 };
 
 const extractionContext = {
@@ -1218,6 +1236,12 @@ test("retrieval trace verifier confirms stored lineage, scope, content and same-
       "retrieval_event_header_mismatch",
     ),
   );
+  assert.equal(
+    runMismatch.evidence[0]?.status,
+    "verified",
+    "a trace-level header error must not contaminate an otherwise valid item",
+  );
+  assert.equal(runMismatch.evidence[0]?.attestation?.hashesMatch, true);
 });
 
 function candidateEvaluationReport(
@@ -1299,7 +1323,7 @@ test("runner recomputes claim coverage and evidence leakage from the verified ma
   assert.equal(summarizedReport(generic).parsed, true);
   assert.equal(generic.passed, false);
   assert.equal(
-    (generic.evaluation as Record<string, unknown>).answerCoverage,
+    ((generic.evaluation as { metrics: { answerCoverage: number } }).metrics).answerCoverage,
     0,
   );
 
@@ -1314,7 +1338,7 @@ test("runner recomputes claim coverage and evidence leakage from the verified ma
   assert.equal(summarizedReport(unrelated).parsed, true);
   assert.equal(unrelated.passed, false);
   assert.equal(
-    (unrelated.evaluation as Record<string, unknown>).retrievalRecall,
+    ((unrelated.evaluation as { metrics: { retrievalRecall: number } }).metrics).retrievalRecall,
     0,
   );
 
@@ -1355,9 +1379,9 @@ test("OBS-05 is not covered by persistent saturation and 31 waiting alone", () =
       }),
     );
     const evaluation = report.evaluation as {
-      responseObservationIds: string[];
+      observationMatrix: Array<{ id: string; status: string }>;
     };
-    assert.equal(evaluation.responseObservationIds.includes("OBS-05"), false, claim);
+    assert.notEqual(evaluation.observationMatrix.find(({ id }) => id === "OBS-05")?.status, "complete", claim);
     assert.equal(report.passed, false, claim);
   }
 });
@@ -1375,8 +1399,8 @@ test("OBS-05 retrieval requires all components in the same evidence event", () =
   const report = validEvaluationReport(
     candidateEvaluationReport({ evidenceManifest: incompleteManifest }),
   );
-  const evaluation = report.evaluation as { retrievedObservationIds: string[] };
-  assert.equal(evaluation.retrievedObservationIds.includes("OBS-05"), false);
+  const evaluation = report.evaluation as { observationMatrix: Array<{ id: string; status: string }> };
+  assert.equal(evaluation.observationMatrix.find(({ id }) => id === "OBS-05")?.status, "not_evaluable");
   assert.equal(report.passed, false);
 });
 
@@ -1390,12 +1414,12 @@ test("verified report integrity rejects altered output and requires a verified t
   );
 
   const alteredMetrics = validEvaluationReport();
-  (alteredMetrics.evaluation as Record<string, unknown>).retrievalRecall = 0.5;
+  ((alteredMetrics.evaluation as { metrics: { retrievalRecall: number } }).metrics).retrievalRecall = 0.5;
   assert.equal(summarizedReport(alteredMetrics).parsed, false);
 
   const alteredCitation = validEvaluationReport();
-  const evaluation = alteredCitation.evaluation as Record<string, unknown>;
-  (evaluation.citations as Record<string, unknown>).invalid = ["[E2]"];
+  const evaluation = alteredCitation.evaluation as { metrics: { citationValidity: { invalid: number } } };
+  evaluation.metrics.citationValidity.invalid = 1;
   assert.equal(summarizedReport(alteredCitation).parsed, false);
 
   const failedTrace = {
@@ -1410,6 +1434,45 @@ test("verified report integrity rejects altered output and requires a verified t
   const failed = validEvaluationReport(candidateEvaluationReport(), failedTrace);
   assert.equal(summarizedReport(failed).parsed, true);
   assert.equal(failed.passed, false);
+});
+
+test("V2 records individual citation occurrences and refuses an irrelevant reuse", () => {
+  const analysis = {
+    ...completeAnalysis,
+    observed_facts: [
+      ...completeAnalysis.observed_facts,
+      { claim: "payment-gateway registró HTTP 500.", evidence_refs: ["E1"] },
+    ],
+  };
+  const result = evaluateInc001V2({
+    response: renderInvestigationAnalysis(analysis),
+    analysis,
+    manifest: evaluationManifest,
+    trace: verifiedTrace,
+    groundTruth: evaluationGroundTruth,
+  });
+  const relationship = result.claimEvidenceMatrix.find(
+    ({ claimId }) => claimId === "fact:6",
+  );
+  assert.equal(relationship?.status, "invalid");
+  assert.ok(relationship?.reasons.includes("evidence_irrelevant_to_claim_occurrence"));
+  assert.equal(result.metrics.citationValidity.invalid, 1);
+  assert.equal(result.accepted, false);
+});
+
+test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {
+  const result = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis),
+    analysis: completeAnalysis,
+    manifest: evaluationManifest,
+    trace: verifiedTrace,
+    groundTruth: evaluationGroundTruth,
+  });
+  const obs02 = result.observationMatrix.find(({ id }) => id === "OBS-02");
+  const obs05 = result.observationMatrix.find(({ id }) => id === "OBS-05");
+  assert.equal(obs02?.status, "complete");
+  assert.equal(obs05?.status, "complete");
+  assert.equal(obs05?.coveredComponents.includes("pool-waiting:18"), false);
 });
 
 test("a valid passing report and successful evaluator and cleanup are jointly required for PASS", () => {

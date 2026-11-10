@@ -475,3 +475,18 @@ En el flujo de reporte verificado, OBS-05 ya no cuenta como completa cuando falt
 El extractor independiente de JSONL registra candidatos completos con identidad, hash y posiciones relativas al fragmento; informa líneas inválidas, incompletas o de otro incidente. No reconstruye registros entre fragmentos ni identifica por sí mismo el formato del documento. El reporte de verificación V1 solo vincula el estado al ID de evidencia, no a un hash en su resultado: el llamador debe conservar exactamente el manifiesto verificado. Las pruebas usan el dataset local y una traza simulada. El extractor todavía no está conectado al runner ni modifica métricas, contratos o aceptación; no existe aún un reporte V2.
 
 Los offsets y metadatos actuales en PostgreSQL no son un snapshot de lo existente durante la recuperación. Para verificar históricamente esas propiedades se necesitaría, como propuesta aún no implementada, un almacenamiento aditivo de snapshot ligado a cada elemento de traza y su verificación, con pruebas de cambios posteriores, linaje, hash y compatibilidad histórica. Consultar los valores actuales no demuestra su estado histórico. No se modificó ninguna migración.
+
+### Implementación de Evaluator V2 — pendiente de integración real
+
+Se conectó el reporte `inc001-verified-v2` al runner aislado. La atestación por
+evidencia contiene identidad, hashes, lineage, scope y metadatos leídos en la
+consulta PostgreSQL; los errores globales ya no marcan falsamente como fallido
+un item que supera sus comprobaciones individuales, aunque bloquean todo uso
+posterior de la traza. El evaluador separa eventos JSONL, citas por aparición,
+componentes OBS-01 a OBS-06 y soporte contextual de código estático.
+
+En esta modificación pasaron los typechecks de API, runner y web. La suite API
+no se pudo iniciar en el host porque Node devolvió `uv_os_get_passwd: ENOMEM`
+al cargar `tsx`; no se interpreta como resultado de las pruebas. No se
+ejecutaron Docker, PostgreSQL, migraciones, runner aislado, Ollama ni INC-001,
+por lo que Phase 3.1 y el Reliability Gate siguen bloqueados.

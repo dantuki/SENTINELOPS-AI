@@ -20,6 +20,46 @@ export interface TraceVerificationReport {
   evidence: EvidenceVerificationStatus[];
 }
 
+/**
+ * Data read from PostgreSQL while verifying one retrieval item.  This is an
+ * attestation of consistency with the rows queried at verification time, not
+ * an external signature and not a historical database snapshot.
+ */
+export interface EvidenceAttestationV2 {
+  evidenceId: string;
+  chunkId: string;
+  documentId: string;
+  sourceId: string;
+  projectId: string;
+  runId: string;
+  retrievalRequestId: string;
+  requestedIncidentId: string | null;
+  rank: number;
+  ordinal: number;
+  expectedContentHash: string;
+  storedContentHash: string | null;
+  recomputedContentHash: string | null;
+  contentMatchesManifest: boolean;
+  hashesMatch: boolean;
+  documentMatchesSource: boolean;
+  projectMatches: boolean;
+  documentStatus: string | null;
+  sourceStatus: string | null;
+  evidenceScope: string | null;
+  metadata: {
+    documentTitle: string | null;
+    mediaType: string | null;
+    sourceDocumentKey: string | null;
+    sourceType: string | null;
+    chunkStartOffset: number | null;
+    chunkEndOffset: number | null;
+    chunkMetadata: Record<string, unknown> | null;
+    documentMetadata: Record<string, unknown> | null;
+    sourceMetadata: Record<string, unknown> | null;
+  };
+  errors: string[];
+}
+
 export interface RetrievalTraceExpectation {
   runId: string;
   requestId: string;
@@ -50,6 +90,14 @@ interface TraceRow {
   documentSourceId: string | null;
   documentStatus: string | null;
   sourceStatus: string | null;
+  documentTitle: string | null;
+  mediaType: string | null;
+  sourceDocumentKey: string | null;
+  sourceType: string | null;
+  chunkStartOffset: number | null;
+  chunkEndOffset: number | null;
+  documentMetadata: Record<string, unknown> | null;
+  sourceMetadata: Record<string, unknown> | null;
 }
 
 function isoTimestamp(value: Date | string | null): string | null {
@@ -152,9 +200,17 @@ export class RetrievalTraceVerifier {
          item.retrieved_at AS "itemRetrievedAt",
          chunk.content,
          chunk.metadata,
+         chunk.start_offset AS "chunkStartOffset",
+         chunk.end_offset AS "chunkEndOffset",
          document.source_id AS "documentSourceId",
          document.status AS "documentStatus",
-         source.status AS "sourceStatus"
+         document.title AS "documentTitle",
+         document.media_type AS "mediaType",
+         document.source_document_key AS "sourceDocumentKey",
+         document.metadata AS "documentMetadata",
+         source.status AS "sourceStatus",
+         source.source_type AS "sourceType",
+         source.metadata AS "sourceMetadata"
        FROM retrieval_events AS event
        LEFT JOIN retrieval_event_items AS item
          ON item.request_id = event.request_id
@@ -247,15 +303,15 @@ export class RetrievalTraceVerifier {
         }
       }
       const manifestErrors = invalidManifestItem(item, index);
-      const status =
-        checks.length === 0 &&
-        manifestErrors.length === 0 &&
-        verificationErrors.length === 0
-          ? "verified"
-          : "failed";
+      const localErrors = [...manifestErrors, ...checks];
+      // Individual evidence is assessed only against its own checks.  A
+      // header/cardinality failure still fails the whole trace below and V2
+      // consumers must reject it fail-closed.
+      const status = localErrors.length === 0 ? "verified" : "failed";
       evidence[index] = {
         evidenceId: item.evidenceId,
         status,
+        attestation: this.attest(item, expected, row, localErrors),
       };
       if (checks.length > 0) {
         verificationErrors.push(
@@ -268,6 +324,54 @@ export class RetrievalTraceVerifier {
       verificationErrors.push("retrieval_event_contains_unmanifested_items");
     }
     return this.report(expected, evidence, verificationErrors, rows.length);
+  }
+
+  private attest(
+    item: EvidenceManifestItem,
+    expected: RetrievalTraceExpectation,
+    row: TraceRow | undefined,
+    errors: string[],
+  ): EvidenceAttestationV2 {
+    const recomputedContentHash = row?.content === null || row?.content === undefined
+      ? null
+      : hashChunkContent(row.content);
+    const storedContentHash = row?.contentHash ?? null;
+    return {
+      evidenceId: item.evidenceId,
+      chunkId: row?.chunkId ?? item.chunkId,
+      documentId: row?.documentId ?? item.documentId,
+      sourceId: row?.sourceId ?? item.sourceId,
+      projectId: row?.projectItemId ?? item.projectId,
+      runId: row?.runId ?? expected.runId,
+      retrievalRequestId: row?.requestId ?? expected.requestId,
+      requestedIncidentId: row?.incidentId ?? expected.incidentId,
+      rank: row?.rank ?? item.rank,
+      ordinal: row?.ordinal ?? item.ordinal,
+      expectedContentHash: item.contentHash,
+      storedContentHash,
+      recomputedContentHash,
+      contentMatchesManifest: row?.content === item.content,
+      hashesMatch:
+        storedContentHash === item.contentHash &&
+        recomputedContentHash === item.contentHash,
+      documentMatchesSource: row?.documentSourceId === item.sourceId,
+      projectMatches: row?.projectItemId === item.projectId,
+      documentStatus: row?.documentStatus ?? null,
+      sourceStatus: row?.sourceStatus ?? null,
+      evidenceScope: row?.evidenceScope ?? null,
+      metadata: {
+        documentTitle: row?.documentTitle ?? null,
+        mediaType: row?.mediaType ?? null,
+        sourceDocumentKey: row?.sourceDocumentKey ?? null,
+        sourceType: row?.sourceType ?? null,
+        chunkStartOffset: row?.chunkStartOffset ?? null,
+        chunkEndOffset: row?.chunkEndOffset ?? null,
+        chunkMetadata: row?.metadata ?? null,
+        documentMetadata: row?.documentMetadata ?? null,
+        sourceMetadata: row?.sourceMetadata ?? null,
+      },
+      errors: [...errors],
+    };
   }
 
   private report(

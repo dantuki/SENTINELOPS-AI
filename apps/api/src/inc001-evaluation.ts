@@ -1,5 +1,6 @@
 import type { InvestigationAnalysis } from "./investigation-analysis.js";
 import type { EvidenceManifestItem } from "./retrieval-trace.js";
+import type { EvidenceAttestationV2 } from "./retrieval-trace-verifier.js";
 
 export interface Inc001Evidence {
   id: string;
@@ -82,6 +83,8 @@ export interface Inc001VerifiedEvaluation extends Inc001Evaluation {
 export interface EvidenceVerificationStatus {
   evidenceId: string;
   status: EvidenceProvenanceStatus;
+  /** Present for V2 SQL verification; absent only in legacy test/report data. */
+  attestation?: EvidenceAttestationV2;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
