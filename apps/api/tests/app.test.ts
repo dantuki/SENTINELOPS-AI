@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import {
   analysisSchema,
   diagnoseInvestigationResponse,
+  normalizeInvestigationCitationDuplicates,
   registerInvestigationRoutes,
 } from "../src/investigation-routes.js";
 import { buildEvidenceCandidateInventory } from "../src/investigation-evidence-inventory.js";
@@ -108,6 +109,72 @@ test("investigation contract diagnostics accept a valid structured response", ()
     diagnoseAnalysis(JSON.parse(structuredInvestigationResponse())),
     [],
   );
+});
+
+test("citation normalization removes only exact aliases, preserves order, and is idempotent", () => {
+  const original = JSON.parse(structuredInvestigationResponse(["E2", "E1", "E2"])) as Record<string, unknown>;
+  original.observed_facts = [
+    { claim: "Primer hecho.", evidence_refs: ["E1", "E1"] },
+    { claim: "Segundo hecho.", evidence_refs: ["E2", "E2", "E1"] },
+  ];
+  original.hypotheses = [{
+    statement: "Hipótesis de prueba.",
+    status: "supported_unconfirmed",
+    supporting_evidence: ["E1", "E1"],
+    contradicting_evidence: ["E2", "E2"],
+  }];
+  const before = JSON.parse(JSON.stringify(original));
+
+  const normalized = normalizeInvestigationCitationDuplicates(original);
+  const result = normalized.value as Record<string, unknown>;
+
+  assert.deepEqual(normalized.diagnostics, [
+    { path: "$.response.summary_evidence_refs", removedDuplicates: 1 },
+    { path: "$.response.observed_facts[0].evidence_refs", removedDuplicates: 1 },
+    { path: "$.response.observed_facts[1].evidence_refs", removedDuplicates: 1 },
+    { path: "$.response.hypotheses[0].supporting_evidence", removedDuplicates: 1 },
+    { path: "$.response.hypotheses[0].contradicting_evidence", removedDuplicates: 1 },
+  ]);
+  assert.deepEqual(result.summary_evidence_refs, ["E2", "E1"]);
+  assert.deepEqual((result.observed_facts as Array<Record<string, unknown>>)[0]?.evidence_refs, ["E1"]);
+  assert.deepEqual((result.observed_facts as Array<Record<string, unknown>>)[1]?.evidence_refs, ["E2", "E1"]);
+  assert.deepEqual((result.hypotheses as Array<Record<string, unknown>>)[0]?.supporting_evidence, ["E1"]);
+  assert.deepEqual((result.hypotheses as Array<Record<string, unknown>>)[0]?.contradicting_evidence, ["E2"]);
+  assert.equal((result.observed_facts as Array<Record<string, unknown>>)[0]?.claim, "Primer hecho.");
+  assert.equal((result.hypotheses as Array<Record<string, unknown>>)[0]?.statement, "Hipótesis de prueba.");
+  assert.deepEqual(original, before);
+  assert.deepEqual(diagnoseAnalysis(result, 2), []);
+
+  const repeatedAcrossClaims = result as Record<string, unknown>;
+  assert.deepEqual((repeatedAcrossClaims.observed_facts as Array<Record<string, unknown>>)[0]?.evidence_refs, ["E1"]);
+  assert.deepEqual((repeatedAcrossClaims.hypotheses as Array<Record<string, unknown>>)[0]?.supporting_evidence, ["E1"]);
+  const repeated = normalizeInvestigationCitationDuplicates(result);
+  assert.deepEqual(repeated.value, result);
+  assert.deepEqual(repeated.diagnostics, []);
+
+  const valid = JSON.parse(structuredInvestigationResponse()) as Record<string, unknown>;
+  const unchanged = normalizeInvestigationCitationDuplicates(valid);
+  assert.strictEqual(unchanged.value, valid);
+  assert.deepEqual(unchanged.diagnostics, []);
+});
+
+test("citation normalization preserves invalid values and leaves them for strict rejection", () => {
+  const unknown = JSON.parse(structuredInvestigationResponse(["E2", "E2"])) as Record<string, unknown>;
+  const normalizedUnknown = normalizeInvestigationCitationDuplicates(unknown);
+  assert.deepEqual((normalizedUnknown.value as Record<string, unknown>).summary_evidence_refs, ["E2"]);
+  assert.ok(diagnoseAnalysis(normalizedUnknown.value).some(({ code }) => code === "evidence_reference_not_found"));
+
+  const malformed = JSON.parse(structuredInvestigationResponse(["bad", "bad", null] as unknown as string[])) as Record<string, unknown>;
+  malformed.unexpected = "remains-present";
+  const normalizedMalformed = normalizeInvestigationCitationDuplicates(malformed);
+  assert.deepEqual((normalizedMalformed.value as Record<string, unknown>).summary_evidence_refs, ["bad", "bad", null]);
+  assert.ok(diagnoseAnalysis(normalizedMalformed.value).some(({ code }) => code === "malformed_citation"));
+  assert.ok(diagnoseAnalysis(normalizedMalformed.value).some(({ code }) => code === "unexpected_field"));
+
+  const empty = JSON.parse(structuredInvestigationResponse([])) as Record<string, unknown>;
+  const normalizedEmpty = normalizeInvestigationCitationDuplicates(empty);
+  assert.deepEqual((normalizedEmpty.value as Record<string, unknown>).summary_evidence_refs, []);
+  assert.ok(diagnoseAnalysis(normalizedEmpty.value).some(({ code }) => code === "array_must_not_be_empty"));
 });
 
 test("investigation contract diagnostics identify invalid JSON without echoing content", () => {
@@ -2124,6 +2191,60 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
     payload.data.evidence,
     payload.data.evidenceManifest,
   );
+});
+
+test("POST project investigate normalizes duplicate citations and logs only the adjustment metadata", async () => {
+  const logChunks: string[] = [];
+  const logStream = new Writable({
+    write(chunk, _encoding, callback) {
+      logChunks.push(chunk.toString());
+      callback();
+    },
+  });
+  const app = createTestApp({ logger: { level: "info", stream: logStream } });
+  let prompt = "";
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input, init) => {
+      if (String(input).endsWith("/embeddings")) {
+        return Response.json(fakeEmbeddingPayload(1));
+      }
+      prompt = (JSON.parse(String(init?.body)) as { prompt: string }).prompt;
+      const analysis = JSON.parse(structuredInvestigationResponse()) as Record<string, unknown>;
+      analysis.summary_evidence_refs = ["E1", "E1"];
+      analysis.observed_facts = [{
+        claim: "El fragmento registra una observación.",
+        evidence_refs: ["E1", "E1"],
+      }];
+      analysis.hypotheses = [{
+        statement: "La observación requiere verificación adicional.",
+        status: "supported_unconfirmed",
+        supporting_evidence: ["E1", "E1"],
+        contradicting_evidence: ["E1", "E1"],
+      }];
+      return Response.json({ model: "test-model", response: JSON.stringify(analysis) });
+    },
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: { question: "Investiga este incidente." },
+  });
+
+  assert.equal(response.statusCode, 200);
+  const analysis = response.json().data.analysis;
+  assert.deepEqual(analysis.summary_evidence_refs, ["E1"]);
+  assert.deepEqual(analysis.observed_facts[0].evidence_refs, ["E1"]);
+  assert.deepEqual(analysis.hypotheses[0].supporting_evidence, ["E1"]);
+  assert.deepEqual(analysis.hypotheses[0].contradicting_evidence, ["E1"]);
+  assert.match(prompt, /alias únicos/u);
+  const logs = logChunks.join("");
+  assert.ok(logs.includes("citationNormalization"));
+  assert.ok(logs.includes("$.response.summary_evidence_refs"));
+  assert.ok(logs.includes("removedDuplicates"));
+  assert.ok(logs.includes("accepted"));
+  assert.equal(logs.includes("La observación requiere verificación adicional."), false);
 });
 
 test("POST project investigate rejects model citations outside retrieved evidence", async () => {

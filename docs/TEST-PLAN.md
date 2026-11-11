@@ -601,3 +601,23 @@ el daemon ausente no permite verificarlos. No se reinició Docker, no se
 modificó `.env`, PostgreSQL habitual ni sus volúmenes, y no se alteró el
 ground truth ni los umbrales. INC-001 y el Reliability Gate permanecen
 abiertos.
+
+### Misión 06 — recuperación del contrato de salida estructurada — 10 de noviembre de 2026
+
+La Product API normaliza, antes de la validación estricta, únicamente alias
+`E<n>` idénticos repetidos dentro de una misma lista permitida:
+`summary_evidence_refs`, `observed_facts[].evidence_refs` y las dos listas de
+evidencia de cada hipótesis. Conserva la primera aparición y no muta la
+respuesta original. Valores con tipos incorrectos, aliases malformados o no
+recuperados, claves adicionales, estados de hipótesis inválidos y listas que
+no pueden estar vacías continúan rechazándose mediante el contrato estricto.
+El ajuste deja una traza mínima de ruta, número de elementos retirados, estado
+de validación e identidad de ejecución; no registra el JSON generado.
+
+No se añadió `uniqueItems` al esquema enviado a Ollama: el esquema actual ya
+se entrega como JSON Schema, pero esta validación no confirmó compatibilidad
+del proveedor con esa palabra clave. La validación de servidor sigue siendo la
+autoridad fail-closed. Las pruebas locales cubren la función pura,
+idempotencia, entradas adversariales, trazabilidad y que el Evaluator V2
+recibe las mismas métricas después de la deduplicación autorizada. Esta
+corrección no ejecuta INC-001 ni cierra ninguno de sus gates.

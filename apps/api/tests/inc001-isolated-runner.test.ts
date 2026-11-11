@@ -34,6 +34,7 @@ import {
   type Inc001GroundTruth,
 } from "../src/inc001-evaluation.js";
 import { renderInvestigationAnalysis } from "../src/investigation-analysis.js";
+import { normalizeInvestigationCitationDuplicates } from "../src/investigation-routes.js";
 import {
   hashChunkContent,
   type EvidenceManifestItem,
@@ -1476,6 +1477,39 @@ test("V2 records individual citation occurrences and refuses an irrelevant reuse
   assert.ok(relationship?.reasons.includes("claim_mixes_unrelated_event_contexts"));
   assert.equal(result.metrics.citationValidity.invalid, 1);
   assert.equal(result.accepted, false);
+});
+
+test("V2 receives the same claim and observation metrics after citation deduplication", () => {
+  const duplicated = {
+    ...completeAnalysis,
+    summary_evidence_refs: ["E1", "E1"],
+    observed_facts: completeAnalysis.observed_facts.map((fact) => ({
+      ...fact,
+      evidence_refs: ["E1", "E1"],
+    })),
+  };
+  const normalized = normalizeInvestigationCitationDuplicates(duplicated);
+  const analysis = normalized.value as typeof completeAnalysis;
+  const expected = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis),
+    analysis: completeAnalysis,
+    manifest: evaluationManifest,
+    trace: verifiedTrace,
+    groundTruth: evaluationGroundTruth,
+  });
+  const actual = evaluateInc001V2({
+    response: renderInvestigationAnalysis(analysis),
+    analysis,
+    manifest: evaluationManifest,
+    trace: verifiedTrace,
+    groundTruth: evaluationGroundTruth,
+  });
+
+  assert.equal(normalized.diagnostics.length, 7);
+  assert.deepEqual(actual.metrics, expected.metrics);
+  assert.deepEqual(actual.observationMatrix, expected.observationMatrix);
+  assert.deepEqual(actual.claimEvidenceMatrix, expected.claimEvidenceMatrix);
+  assert.equal(actual.accepted, expected.accepted);
 });
 
 test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {

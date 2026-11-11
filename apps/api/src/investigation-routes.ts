@@ -308,6 +308,122 @@ function parseEvidenceReferences(
   return [...references];
 }
 
+export interface CitationDeduplicationDiagnostic {
+  path: string;
+  removedDuplicates: number;
+}
+
+function deduplicateEvidenceAliases(value: unknown): {
+  value: unknown;
+  removedDuplicates: number;
+} {
+  if (!Array.isArray(value)) {
+    return { value, removedDuplicates: 0 };
+  }
+
+  const aliases = new Set<string>();
+  const result: unknown[] = [];
+  let removedDuplicates = 0;
+  for (const item of value) {
+    if (typeof item === "string" && /^E[1-9][0-9]*$/u.test(item)) {
+      if (aliases.has(item)) {
+        removedDuplicates += 1;
+        continue;
+      }
+      aliases.add(item);
+    }
+    result.push(item);
+  }
+  return { value: removedDuplicates > 0 ? result : value, removedDuplicates };
+}
+
+/**
+ * Removes only repeated syntactically valid aliases from the four citation
+ * fields. Every other value and field is retained for strict validation.
+ */
+export function normalizeInvestigationCitationDuplicates(value: unknown): {
+  value: unknown;
+  diagnostics: CitationDeduplicationDiagnostic[];
+} {
+  if (!isRecord(value)) {
+    return { value, diagnostics: [] };
+  }
+
+  const diagnostics: CitationDeduplicationDiagnostic[] = [];
+  let normalized: Record<string, unknown> = value;
+  let changed = false;
+  const replaceRoot = (key: string, path: string) => {
+    const result = deduplicateEvidenceAliases(value[key]);
+    if (result.removedDuplicates === 0) {
+      return;
+    }
+    if (!changed) {
+      normalized = { ...value };
+      changed = true;
+    }
+    normalized[key] = result.value;
+    diagnostics.push({ path, removedDuplicates: result.removedDuplicates });
+  };
+
+  replaceRoot("summary_evidence_refs", "$.response.summary_evidence_refs");
+
+  const replaceNested = (
+    listKey: "observed_facts" | "hypotheses",
+    referenceKeys: readonly string[],
+  ) => {
+    const list = value[listKey];
+    if (!Array.isArray(list)) {
+      return;
+    }
+    let nextList = list;
+    let listChanged = false;
+    for (let index = 0; index < list.length; index += 1) {
+      const item = list[index];
+      if (!isRecord(item)) {
+        continue;
+      }
+      let nextItem = item;
+      let itemChanged = false;
+      for (const referenceKey of referenceKeys) {
+        const result = deduplicateEvidenceAliases(item[referenceKey]);
+        if (result.removedDuplicates === 0) {
+          continue;
+        }
+        if (!itemChanged) {
+          nextItem = { ...item };
+          itemChanged = true;
+        }
+        nextItem[referenceKey] = result.value;
+        diagnostics.push({
+          path: `$.response.${listKey}[${index}].${referenceKey}`,
+          removedDuplicates: result.removedDuplicates,
+        });
+      }
+      if (itemChanged) {
+        if (!listChanged) {
+          nextList = [...list];
+          listChanged = true;
+        }
+        nextList[index] = nextItem;
+      }
+    }
+    if (listChanged) {
+      if (!changed) {
+        normalized = { ...value };
+        changed = true;
+      }
+      normalized[listKey] = nextList;
+    }
+  };
+
+  replaceNested("observed_facts", ["evidence_refs"]);
+  replaceNested("hypotheses", [
+    "supporting_evidence",
+    "contradicting_evidence",
+  ]);
+  return { value: normalized, diagnostics };
+}
+
 function parseInvestigationAnalysis(
   value: unknown,
   evidenceCount: number,
@@ -461,26 +577,24 @@ function parseModelAnalysis(
       model: string;
       analysis: InvestigationAnalysis;
       diagnostics: [];
+      normalizationDiagnostics: CitationDeduplicationDiagnostic[];
     }
-  | { ok: false; diagnostics: ContractDiagnostic[] } {
-  const diagnostics = diagnoseInvestigationResponse(value, evidenceCount);
-  if (diagnostics.length > 0) {
-    return { ok: false, diagnostics };
-  }
+  | {
+      ok: false;
+      diagnostics: ContractDiagnostic[];
+      normalizationDiagnostics: CitationDeduplicationDiagnostic[];
+    } {
+  const envelopeDiagnostics = diagnoseInvestigationEnvelope(value);
   if (
+    envelopeDiagnostics.length > 0 ||
     !isRecord(value) ||
     typeof value.model !== "string" ||
-    !value.model.trim() ||
     typeof value.response !== "string"
   ) {
     return {
       ok: false,
-      diagnostics: [
-        {
-          path: "$",
-          code: "invalid_orchestrator_response",
-        },
-      ],
+      diagnostics: envelopeDiagnostics,
+      normalizationDiagnostics: [],
     };
   }
   let decoded: unknown;
@@ -490,16 +604,36 @@ function parseModelAnalysis(
     return {
       ok: false,
       diagnostics: [{ path: "$.response", code: "invalid_json" }],
+      normalizationDiagnostics: [],
     };
   }
-  const analysis = parseInvestigationAnalysis(decoded, evidenceCount);
+  const normalized = normalizeInvestigationCitationDuplicates(decoded);
+  const diagnostics = diagnoseInvestigationAnalysis(
+    normalized.value,
+    evidenceCount,
+  );
+  if (diagnostics.length > 0) {
+    return {
+      ok: false,
+      diagnostics,
+      normalizationDiagnostics: normalized.diagnostics,
+    };
+  }
+  const analysis = parseInvestigationAnalysis(normalized.value, evidenceCount);
   return analysis
-    ? { ok: true, model: value.model.trim(), analysis, diagnostics: [] }
+    ? {
+        ok: true,
+        model: value.model.trim(),
+        analysis,
+        diagnostics: [],
+        normalizationDiagnostics: normalized.diagnostics,
+      }
     : {
         ok: false,
         diagnostics: [
           { path: "$.response", code: "semantic_validation_failed" },
         ],
+        normalizationDiagnostics: normalized.diagnostics,
       };
 }
 
@@ -512,6 +646,20 @@ export function diagnoseInvestigationResponse(
   value: unknown,
   evidenceCount: number,
 ): ContractDiagnostic[] {
+  const diagnostics = diagnoseInvestigationEnvelope(value);
+  if (diagnostics.length > 0 || !isRecord(value) || typeof value.response !== "string") {
+    return diagnostics;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value.response);
+  } catch {
+    return [{ path: "$.response", code: "invalid_json" }];
+  }
+  return diagnoseInvestigationAnalysis(decoded, evidenceCount);
+}
+
+function diagnoseInvestigationEnvelope(value: unknown): ContractDiagnostic[] {
   if (!isRecord(value)) {
     return [{ path: "$", code: "expected_object" }];
   }
@@ -528,16 +676,7 @@ export function diagnoseInvestigationResponse(
   } else if (typeof value.response !== "string") {
     diagnostics.push({ path: "$.response", code: "expected_string" });
   }
-  if (diagnostics.length > 0 || typeof value.response !== "string") {
-    return diagnostics;
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(value.response);
-  } catch {
-    return [{ path: "$.response", code: "invalid_json" }];
-  }
-  return diagnoseInvestigationAnalysis(decoded, evidenceCount);
+  return diagnostics;
 }
 
 function diagnoseInvestigationAnalysis(
@@ -1186,6 +1325,7 @@ export function registerInvestigationRoutes(
         "Devuelve una investigación estructurada para SentinelOps AI.",
         "El objeto JSON debe cumplir exactamente el esquema descrito al final; no uses Markdown ni texto fuera del JSON.",
         "Incluye todas las claves obligatorias, no añadas claves extra y respeta los tipos y límites del esquema. summary_evidence_refs y los evidence_refs de cada hecho deben ser listas no vacías; las listas sin elementos deben ser [].",
+        "Cada lista de referencias debe contener alias únicos; no repitas un alias dentro de la misma lista.",
         "Usa español. Cada hecho observado debe ser una afirmación atómica y citar una o más referencias mediante evidence_refs.",
         "El inventario auxiliar identifica registros completos de evidencia. Para cada registro relevante, conserva sus propiedades observadas en un hecho del mismo registro: no combines campos de registros distintos, no omitas valores cero, unidades, estados HTTP ni duraciones. El inventario no es ground truth, no es una respuesta preparada y no autoriza inferencias.",
         "El resumen también debe citar sus referencias en summary_evidence_refs. Usa exclusivamente etiquetas presentes en las evidencias, como E1; no escribas etiquetas de cita dentro de los textos.",
@@ -1303,6 +1443,12 @@ export function registerInvestigationRoutes(
             elapsedMs: elapsedMilliseconds(chatStartedAt),
             statusCode: chatHttpResponse.status,
             diagnostics: parsedAnalysis.diagnostics,
+            citationNormalization: {
+              adjustments: parsedAnalysis.normalizationDiagnostics,
+              validation: "rejected",
+              runId,
+              requestId,
+            },
           },
           "Investigation stage returned an invalid response",
         );
@@ -1321,6 +1467,12 @@ export function registerInvestigationRoutes(
           stage: "chat",
           elapsedMs: elapsedMilliseconds(chatStartedAt),
           responseWords: initialWordCount,
+          citationNormalization: {
+            adjustments: parsedAnalysis.normalizationDiagnostics,
+            validation: "accepted",
+            runId,
+            requestId,
+          },
         },
         "Investigation stage completed",
       );
