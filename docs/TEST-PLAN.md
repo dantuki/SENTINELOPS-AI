@@ -560,3 +560,44 @@ valores, ceros, duraciones y no afirmar causalidad por correlación; por tanto
 el fallo se atribuye a la salida real del modelo, no se corrige alterando el
 ground truth ni reduciendo el gate. No se realizó un tercer intento para
 seleccionar una salida favorable.
+
+### Misión 05 — recuperación semántica y recomputación histórica — 10 de noviembre de 2026
+
+La recomputación determinista del reporte histórico
+`2026-11-10T01-39-16-264Z/evaluation.json` conserva sus entradas y confirma
+que la recuperación fue completa. El informe de comparación nuevo en
+`reports/inc001-isolated/mission-05-historical-recomputation.json` no altera
+el reporte original: corrige dos falsos negativos verificables del evaluador
+(la formulación `timeout de adquisición de conexión` y la profundidad de una
+cola expresada mediante lenguaje natural). Con los mismos datos, OBS-04 pasa a
+estar completa y la cobertura sube de 1/6 a 2/6; no es una mejora de
+generación. OBS-02, OBS-03, OBS-05 y OBS-06 continúan incompletas por
+componentes omitidos o por contextos de eventos que no se pueden fusionar.
+
+La generación incorpora un inventario auxiliar de registros JSONL completos,
+derivado únicamente de la evidencia recuperada y con identidad de evidencia,
+proyecto, incidente y offsets de cada registro. El inventario no contiene el
+ground truth ni construye una respuesta: instruye al modelo a conservar los
+campos de un mismo registro sin combinarlos. También se exige que el resumen
+sea cronológico y neutral; una afirmación causal puede aparecer únicamente
+como hipótesis explícitamente no confirmada. El evaluador ahora registra como
+violación la atribución de la saturación a intentos concurrentes cuando se
+presenta como hecho, sin reescribir el texto del modelo.
+
+| Comprobación | Resultado |
+|---|---|
+| Recomputación de los artefactos históricos | PASS determinista; el resultado sigue siendo `passed: false` |
+| `npm.cmd test --workspace=@sentinelops/api` | 148 aprobadas, 0 fallidas |
+| Pruebas del orquestador | 35 aprobadas, 0 fallidas |
+| Typecheck API y runner; build API | PASS |
+| Typecheck y build web | PASS |
+| `git diff --check` | PASS |
+| Preflight aislado posterior | FAIL seguro: el daemon Docker no estaba alcanzable desde este entorno; no se inició ningún recurso temporal |
+
+El preflight posterior siguió encontrando Ollama y ambos modelos, el entorno
+virtual del orquestador y puertos loopback disponibles. No se hizo una nueva
+evaluación real: su autorización exige preflight e aislamiento correctos, y
+el daemon ausente no permite verificarlos. No se reinició Docker, no se
+modificó `.env`, PostgreSQL habitual ni sus volúmenes, y no se alteró el
+ground truth ni los umbrales. INC-001 y el Reliability Gate permanecen
+abiertos.

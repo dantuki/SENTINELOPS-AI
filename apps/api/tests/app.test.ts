@@ -8,6 +8,7 @@ import {
   diagnoseInvestigationResponse,
   registerInvestigationRoutes,
 } from "../src/investigation-routes.js";
+import { buildEvidenceCandidateInventory } from "../src/investigation-evidence-inventory.js";
 import { renderInvestigationAnalysis } from "../src/investigation-analysis.js";
 import { buildApp } from "../src/app.js";
 import type {
@@ -53,6 +54,39 @@ const sharedInvestigationSchema: unknown = JSON.parse(
 
 test("Product API investigation schema matches the shared contract", () => {
   assert.deepEqual(analysisSchema, sharedInvestigationSchema);
+});
+
+test("candidate inventory preserves complete JSONL records without joining them", () => {
+  const content = [
+    '{"incident_id":"INC-001","event":"pool","idle_connections":0}',
+    '{"incident_id":"INC-001","event":"payment","duration_ms":180}',
+    '{"incident_id":"INC-001","event":',
+  ].join("\n");
+  const inventory = buildEvidenceCandidateInventory([{
+    evidenceId: "11111111-1111-4111-8111-111111111111",
+    chunkId: "11111111-1111-4111-8111-111111111111",
+    documentId: "22222222-2222-4222-8222-222222222222",
+    sourceId: "33333333-3333-4333-8333-333333333333",
+    projectId: "44444444-4444-4444-8444-444444444444",
+    runId: "55555555-5555-4555-8555-555555555555",
+    requestId: "66666666-6666-4666-8666-666666666666",
+    alias: "E1",
+    incidentId: "INC-001",
+    ordinal: 0,
+    rank: 1,
+    score: 0.8,
+    content,
+    contentHash: "a".repeat(64),
+    evidenceScope: "incident_specific",
+    retrievedAt: "2026-01-01T00:00:00.000Z",
+  }]);
+  assert.equal(inventory.version, "evidence-candidate-inventory-v1");
+  assert.equal(inventory.records.length, 2);
+  assert.deepEqual(inventory.records[0]?.fields, {
+    incident_id: "INC-001", event: "pool", idle_connections: 0,
+  });
+  assert.equal(inventory.records[1]?.fields.duration_ms, 180);
+  assert.notEqual(inventory.records[0]?.recordId, inventory.records[1]?.recordId);
 });
 
 function diagnoseAnalysis(
@@ -2069,6 +2103,8 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
   assert.ok(requestedPrompt.includes(chunkTestRecord.content));
   assert.ok(requestedPrompt.includes(chunkTestRecord.id));
   assert.ok(requestedPrompt.includes('"citation": "E1"'));
+  assert.match(requestedPrompt, /evidence-candidate-inventory-v1/u);
+  assert.match(requestedPrompt, /cronología neutral/u);
 
   const payload = response.json();
 

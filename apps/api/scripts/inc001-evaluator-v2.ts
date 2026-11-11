@@ -131,8 +131,8 @@ function componentsInText(text: string): Set<string> {
   if (textHas(text, /\b(?:persist\w*|remained\s+saturated|permaneci[oó]\s+saturad\w*)\b/iu)) found.add("pool-persistent");
   if (textHas(text, /\bPOST\s+\/api\/orders\b/iu)) found.add("path:POST:/api/orders");
   if (textHas(text, /(?:HTTP\s*500|status_code\D{0,12}500)/iu)) found.add("http:500");
-  if (textHas(text, /(?:timeout\s+(?:acquiring|al adquirir).{0,40}(?:PostgreSQL\s+)?pool|pool.{0,40}timeout|(?:agot[oó]\s+el\s+)?tiempo\s+de\s+espera\s+al\s+adquirir\s+(?:una\s+)?conexi[oó]n)/iu)) found.add("pool-timeout");
-  if (textHas(text, /(?:queue_depth\D{0,12}42|(?:queue|cola).{0,25}\b42\b)/iu)) found.add("retry-queue:42");
+  if (textHas(text, /(?:timeout\s+(?:acquiring|al adquirir).{0,40}(?:PostgreSQL\s+)?pool|timeout\s+de\s+adquisici[oó]n\s+de\s+(?:una\s+)?conexi[oó]n|pool.{0,40}timeout|(?:agot[oó]\s+el\s+)?tiempo\s+de\s+espera\s+al\s+adquirir\s+(?:una\s+)?conexi[oó]n)/iu)) found.add("pool-timeout");
+  if (textHas(text, /(?:queue_depth\D{0,12}42|(?:queue|cola)(?:\s+de\s+(?:retries|reintentos))?[^.!?\r\n]{0,90}\b(?:depth|profundidad)\s*(?:de|:|=)?\s*42\b|(?:queue|cola)(?:\s+de\s+(?:retries|reintentos))?\s*(?:[:=]|alcanz[oó]|reached)\s*42\b)/iu)) found.add("retry-queue:42");
   if (textHas(text, /(?:retries_started_last_minute\D{0,12}120|120\s+(?:retries|reintentos).{0,30}(?:minute|minuto))/iu)) found.add("retries-minute:120");
   if (textHas(text, /\bpayment-gateway\b/iu)) found.add("service:payment-gateway");
   if (textHas(text, /(?:HTTP\s*200|status_code\D{0,12}200)/iu)) found.add("http:200");

@@ -228,6 +228,13 @@ const factualityRules: Array<{
       /(?:saturaci[oó]n (?:del|de) (?:pool|conexiones)|pool de conexiones)[\s\S]{0,100}(?:caus[oó]|provoc[oó]|origin[oó]|caused|triggered)[\s\S]{0,120}(?:http\s*500|falla|fallo|error)/iu,
   },
   {
+    id: "unproven-retry-causality",
+    description:
+      "Presenta los intentos concurrentes como causa confirmada de la saturación.",
+    pattern:
+      /(?:saturaci[oó]n (?:del|de) (?:pool|conexiones)|pool de conexiones)[\s\S]{0,100}(?:debido\s+a|por\s+culpa\s+de|caused\s+by)[\s\S]{0,120}(?:intentos|attempts?|reintentos|retries)|(?:intentos|attempts?|reintentos|retries)[\s\S]{0,120}(?:caus[oó]|provoc[oó]|origin[oó]|caused|triggered)[\s\S]{0,100}(?:saturaci[oó]n|pool)/iu,
+  },
+  {
     id: "similarity-as-causal-probability",
     description:
       "Interpreta la similitud de recuperación como probabilidad causal.",
@@ -280,8 +287,28 @@ function matchesUnnegatedClaim(text: string, pattern: RegExp): boolean {
 
   return (
     match !== null &&
-    !isExplicitlyNegated(text, match.index, match[0].length)
+    !isExplicitlyNegated(text, match.index, match[0].length) &&
+    !isExplicitlyQualifiedHypothesis(text, match.index, match[0].length)
   );
+}
+
+function isExplicitlyQualifiedHypothesis(
+  text: string,
+  matchIndex: number,
+  matchLength: number,
+): boolean {
+  const start = Math.max(
+    text.lastIndexOf(".", matchIndex),
+    text.lastIndexOf(";", matchIndex),
+    text.lastIndexOf("\n", matchIndex),
+    text.lastIndexOf("!", matchIndex),
+    text.lastIndexOf("?", matchIndex),
+  ) + 1;
+  const following = text.slice(matchIndex + matchLength);
+  const sentenceEnd = following.search(/[.!?;\n]/u);
+  const end = sentenceEnd === -1 ? text.length : matchIndex + matchLength + sentenceEnd;
+  const sentence = text.slice(start, end);
+  return /\b(?:hip[oó]tesis|hypothesis)\b[^.!?]{0,120}\b(?:no\s+confirmad\w*|posible|podr[ií]a|could|may|might)\b|\b(?:respaldada|supported)\s*,?\s*(?:no\s+confirmad\w*|unconfirmed)\b/iu.test(sentence);
 }
 
 export function detectFactualityViolations(

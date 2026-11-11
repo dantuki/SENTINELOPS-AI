@@ -151,6 +151,7 @@ test("INC-001 evaluator detects the specified factuality errors", () => {
     "El éxito de payment-gateway demuestra que la operación de negocio fue exitosa.",
     "El HTTP 500 confirma el resultado del negocio como fallo total.",
     "La saturación del pool provocó el error HTTP 500.",
+    "La saturación del pool ocurrió debido a intentos concurrentes.",
     "La similitud demuestra la causa raíz con probabilidad causal.",
     "El código sintético fue ejecutado en producción.",
     "La coincidencia temporal demuestra la causalidad.",
@@ -168,6 +169,7 @@ test("INC-001 evaluator detects the specified factuality errors", () => {
       "component-http-200-as-business-success",
       "unsupported-http-500-business-outcome",
       "unproven-pool-root-cause",
+      "unproven-retry-causality",
       "similarity-as-causal-probability",
       "synthetic-code-as-production-execution",
       "temporal-coincidence-as-proven-causality",
@@ -186,6 +188,7 @@ test("INC-001 evaluator does not flag explicit denials of unsupported claims", (
     "El HTTP 500 no demuestra que la operación completa fallara.",
     "La coincidencia temporal no demuestra causalidad.",
     "El código sintético no se ejecutó en producción.",
+    "Hipótesis respaldada, no confirmada: la saturación podría deberse a intentos concurrentes.",
   ].join(" ");
 
   const result = evaluateInc001Response(response, [], groundTruth);

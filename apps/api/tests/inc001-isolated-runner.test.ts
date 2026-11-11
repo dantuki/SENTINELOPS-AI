@@ -1493,6 +1493,45 @@ test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {
   assert.equal(obs05?.coveredComponents.includes("pool-waiting:18"), false);
 });
 
+test("V2 recognizes queue-depth and pool-timeout paraphrases without accepting adjacent properties", () => {
+  const analysis = {
+    ...completeAnalysis,
+    observed_facts: completeAnalysis.observed_facts.map((fact, index) => {
+      if (index === 2) {
+        return { claim: "req-7841 falló en POST /api/orders por timeout de adquisición de conexión; HTTP 500.", evidence_refs: ["E1"] };
+      }
+      if (index === 3) {
+        return { claim: "La cola de reintentos creció hasta una profundidad de 42 elementos y se iniciaron 120 reintentos en el último minuto.", evidence_refs: ["E1"] };
+      }
+      return fact;
+    }),
+  };
+  const result = evaluateInc001V2({
+    response: renderInvestigationAnalysis(analysis), analysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+  });
+  assert.equal(result.claims.find(({ id }) => id === "fact:2")?.components.includes("pool-timeout"), true);
+  const queue = result.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:3");
+  assert.deepEqual(queue?.supportedComponents, ["retries-minute:120", "retry-queue:42"]);
+  assert.equal(queue?.status, "valid");
+
+  const adversarial = {
+    ...analysis,
+    observed_facts: analysis.observed_facts.map((fact, index) =>
+      index === 3
+        ? { claim: "La cola de reintentos no cambió; una duración separada fue 42 ms y se iniciaron 120 reintentos en el último minuto.", evidence_refs: ["E1"] }
+        : fact,
+    ),
+  };
+  const rejected = evaluateInc001V2({
+    response: renderInvestigationAnalysis(adversarial), analysis: adversarial,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+  });
+  assert.equal(rejected.claims.find(({ id }) => id === "fact:3")?.components.includes("retry-queue:42"), false);
+  assert.equal(rejected.claimEvidenceMatrix.find(({ claimId }) => claimId === "fact:3")?.supportedComponents.includes("retry-queue:42"), false);
+  assert.equal(rejected.observationMatrix.find(({ id }) => id === "OBS-04")?.status, "incomplete");
+});
+
 test("V2 rejects a claim that combines OBS-02 capacity with the later OBS-05 wait count", () => {
   const analysis = {
     ...completeAnalysis,
