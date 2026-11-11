@@ -9,9 +9,14 @@ import type { InvestigationAnalysis } from "../src/investigation-analysis.js";
 import type { EvidenceManifestItem } from "../src/retrieval-trace.js";
 import type { TraceVerificationReport } from "../src/retrieval-trace-verifier.js";
 import {
-  extractInc001JsonlEvents,
-  type Inc001Event,
-} from "./inc001-jsonl-events.js";
+  extractVerifiedFacts,
+  type VerifiedFactInventory,
+  type VerifiedFactRecord,
+} from "../src/verified-fact-engine.js";
+import {
+  hasCompletePresentedFacts,
+  type VerifiedInvestigationResult,
+} from "../src/verified-investigation-result.js";
 
 export type V2RelationshipStatus = "valid" | "partial" | "invalid" | "not_evaluable";
 export type V2ObservationStatus = "complete" | "incomplete" | "not_evaluable" | "blocked";
@@ -87,6 +92,7 @@ export interface V2ObservationResult {
 
 export interface Inc001EvaluationV2 {
   version: "inc001-evaluation-v2";
+  verifiedFactInventory: VerifiedFactInventory;
   evidenceInventory: Array<{
     alias: string;
     evidenceId: string;
@@ -102,6 +108,8 @@ export interface Inc001EvaluationV2 {
   metrics: {
     retrievalRecall: number;
     answerCoverage: number;
+    verifiedFactCoverage: number;
+    finalResultCoverage: number;
     citationValidity: { valid: number; partial: number; invalid: number; notEvaluable: number };
     claimSupport: { supported: number; partiallySupported: number; unsupported: number; contradicted: number; unverified: number; contextual: number; notEvaluable: number };
     factualityViolations: string[];
@@ -111,6 +119,12 @@ export interface Inc001EvaluationV2 {
     provenanceStatus: "verified" | "failed" | "unverified";
   };
   accepted: boolean;
+  productGate: {
+    version: "evidence-first-product-investigation-gate-v1";
+    passed: boolean;
+    presentedFactsComplete: boolean;
+    generativeAnalysisStatus: VerifiedInvestigationResult["aiAnalysis"]["status"] | "absent";
+  };
 }
 
 function textHas(text: string, pattern: RegExp): boolean {
@@ -141,7 +155,7 @@ function componentsInText(text: string): Set<string> {
   return found;
 }
 
-function eventComponents(event: Inc001Event): Set<string> {
+function eventComponents(event: Pick<VerifiedFactRecord, "fields">): Set<string> {
   const fields = event.fields;
   // Event evidence is derived from typed fields and an expected event name.
   // Free-form messages are not allowed to smuggle numeric components into a
@@ -272,16 +286,31 @@ function factualClaimWithoutObservedComponent(claim: V2Claim): boolean {
   return claim.factual && claim.components.length === 0 && claim.kind !== "limitation" && claim.kind !== "recommendation";
 }
 
+function presentsConfirmedCausality(analysis: InvestigationAnalysis): boolean {
+  const asserted = [analysis.summary, ...analysis.observed_facts.map(({ claim }) => claim)];
+  return asserted.some((text) => /\b(?:caus(?:e[ds]?|ó|aron|aba)|provoc(?:ó|aron|a)|originating|root cause|causa ra[ií]z|debido a)\b/iu.test(text));
+}
+
 export function evaluateInc001V2(input: {
   response: string;
   analysis: InvestigationAnalysis;
   manifest: EvidenceManifestItem[];
   trace: TraceVerificationReport;
   groundTruth: Inc001GroundTruth;
+  publicResult?: VerifiedInvestigationResult;
 }): Inc001EvaluationV2 {
   const traceVerified = input.trace.status === "verified" && input.trace.verificationErrors.length === 0;
   const verificationById = new Map(input.trace.evidence.map((item) => [item.evidenceId, item]));
   const claims = buildClaims(input.analysis);
+  const firstEvidence = input.manifest[0];
+  const verifiedFactInventory = extractVerifiedFacts({
+    manifest: input.manifest,
+    trace: input.trace,
+    runId: input.trace.runId,
+    requestId: input.trace.requestId,
+    projectId: firstEvidence?.projectId ?? "",
+    incidentId: "INC-001",
+  });
   const evidenceComponents = new Map<string, Set<string>>();
   const evidenceContexts = new Map<string, EvidenceContext[]>();
 
@@ -291,20 +320,18 @@ export function evaluateInc001V2(input: {
     const components = new Set<string>();
     const contexts: EvidenceContext[] = [];
     if (usable && item.evidenceScope === "incident_specific" && item.incidentId === "INC-001") {
-      try {
-        const extraction = extractInc001JsonlEvents(item, input.trace, {
-          runId: item.runId, retrievalRequestId: item.requestId, projectId: item.projectId, incidentId: "INC-001", retrievedAt: item.retrievedAt,
-        });
-        for (const event of extraction.events) {
-          const eventParts = eventComponents(event);
-          for (const component of eventParts) components.add(component);
-          contexts.push({ id: `event:${event.id}`, kind: "event", components: eventParts });
-        }
-      } catch {
-        // A non-JSONL chunk may still be statically evaluable code below.
+      for (const event of verifiedFactInventory.records.filter(
+        (record) => record.evidenceId === item.evidenceId,
+      )) {
+        const eventParts = eventComponents(event);
+        for (const component of eventParts) components.add(component);
+        contexts.push({ id: `event:${event.eventId}`, kind: "event", components: eventParts });
       }
-      const attested = verification?.attestation;
-      const isTypeScript = attested?.metadata.sourceDocumentKey?.endsWith(".ts") || attested?.metadata.documentTitle?.endsWith(".ts");
+      const isTypeScript = verifiedFactInventory.contextualArtifacts.some(
+        (artifact) =>
+          artifact.evidenceId === item.evidenceId &&
+          artifact.classification === "static_code",
+      );
       if (isTypeScript) {
         const staticParts = staticCodeComponents(item.content);
         for (const component of staticParts) components.add(component);
@@ -419,14 +446,20 @@ export function evaluateInc001V2(input: {
   const unsupported = claims.filter((claim) => claim.factual && claim.references.length > 0 && !relationships.some((relationship) => relationship.claimId === claim.id && (relationship.status === "valid" || relationship.status === "partial"))).length + factsWithoutSupport.length;
   const partial = claims.filter((claim) => relationships.some((relationship) => relationship.claimId === claim.id && relationship.status === "partial")).length;
   const factualityViolations = detectFactualityViolations(`${input.response}\n${JSON.stringify(input.analysis)}`).map(({ id }) => id);
+  const confirmedCausalityPresented = presentsConfirmedCausality(input.analysis);
   const referenceLeaked = containsEvaluationReference(input.manifest.map((item) => ({ id: item.evidenceId, content: item.content })));
   const abstained = input.manifest.length === 0;
   const retrievalComplete = observationMatrix.filter(({ status }) => status !== "not_evaluable" && status !== "blocked").length;
   const coverageComplete = observationMatrix.filter(({ status }) => status === "complete").length;
+  const presentedFactsComplete = hasCompletePresentedFacts(verifiedFactInventory, input.publicResult);
+  const finalResultCoverage = presentedFactsComplete
+    ? (OBSERVATIONS.length === 0 ? 0 : retrievalComplete / OBSERVATIONS.length)
+    : (OBSERVATIONS.length === 0 ? 0 : coverageComplete / OBSERVATIONS.length);
   const contradictions = observationMatrix.flatMap(({ contradictions: values }) => values);
   const accepted = traceVerified && retrievalComplete === OBSERVATIONS.length && coverageComplete === OBSERVATIONS.length && citationValidity.invalid === 0 && citationValidity.notEvaluable === 0 && unsupported === 0 && factualityViolations.length === 0 && contradictions.length === 0 && !referenceLeaked && !abstained;
   return {
     version: "inc001-evaluation-v2",
+    verifiedFactInventory,
     evidenceInventory: input.manifest.map((item) => {
       const verification = verificationById.get(item.evidenceId);
       return { alias: item.alias, evidenceId: item.evidenceId, contentHash: item.contentHash, scope: item.evidenceScope, verification: verification?.status ?? "unverified", metadata: verification?.attestation?.metadata ?? null, temporalLimitation: "Current PostgreSQL rows were compared to the retrieval trace; this is not a historical snapshot or external signature." };
@@ -437,6 +470,9 @@ export function evaluateInc001V2(input: {
     metrics: {
       retrievalRecall: OBSERVATIONS.length === 0 ? 0 : retrievalComplete / OBSERVATIONS.length,
       answerCoverage: OBSERVATIONS.length === 0 ? 0 : coverageComplete / OBSERVATIONS.length,
+      verifiedFactCoverage: OBSERVATIONS.length === 0 ? 0 : retrievalComplete / OBSERVATIONS.length,
+      // This metric is public-result coverage, distinct from model claims.
+      finalResultCoverage,
       citationValidity,
       claimSupport: { supported: claims.filter((claim) => relationships.some((relationship) => relationship.claimId === claim.id && relationship.status === "valid")).length, partiallySupported: partial, unsupported, contradicted: 0, unverified: traceVerified ? 0 : claims.length, contextual: relationships.filter(({ contextualOnly, status }) => contextualOnly && status === "valid").length, notEvaluable: relationships.filter(({ status }) => status === "not_evaluable").length },
       factualityViolations,
@@ -446,5 +482,13 @@ export function evaluateInc001V2(input: {
       provenanceStatus: traceVerified ? "verified" : input.trace.status,
     },
     accepted,
+    productGate: {
+      version: "evidence-first-product-investigation-gate-v1",
+      passed: traceVerified && presentedFactsComplete && finalResultCoverage === 1 &&
+        factualityViolations.length === 0 && !confirmedCausalityPresented && !referenceLeaked &&
+        input.publicResult?.aiAnalysis.status === "validated",
+      presentedFactsComplete,
+      generativeAnalysisStatus: input.publicResult?.aiAnalysis.status ?? "absent",
+    },
   };
 }

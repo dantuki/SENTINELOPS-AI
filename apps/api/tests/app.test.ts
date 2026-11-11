@@ -2356,6 +2356,27 @@ test("POST project investigate maps orchestrator HTTP 500 to a sanitized 503", a
   assert.equal(response.body.includes("private traceback"), false);
 });
 
+test("POST project investigate maps an invalid orchestrator request to a sanitized 502", async () => {
+  const app = createTestApp();
+  registerInvestigationRoutes(app, createFakeEmbeddingStore(), {
+    aiOrchestratorUrl: "http://127.0.0.1:8001",
+    fetchImpl: async (input) =>
+      String(input).endsWith("/embeddings")
+        ? Response.json(fakeEmbeddingPayload(1))
+        : new Response("prompt length detail", { status: 422 }),
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/projects/${sourceTestProjectId}/investigate`,
+    payload: { question: "Investiga este incidente." },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.deepEqual(response.json(), { error: "Invalid investigation request" });
+  assert.equal(response.body.includes("prompt length detail"), false);
+});
+
 test("POST project investigate rejects unsupported hypothesis states", async () => {
   const app = createTestApp();
 

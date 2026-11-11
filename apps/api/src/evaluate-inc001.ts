@@ -14,6 +14,7 @@ import {
   isUuid,
   type EvidenceManifestItem,
 } from "./retrieval-trace.js";
+import type { VerifiedInvestigationResult } from "./verified-investigation-result.js";
 
 interface InvestigationData {
   model: string;
@@ -24,6 +25,7 @@ interface InvestigationData {
   requestId: string;
   retrievedAt: string;
   analysis: InvestigationAnalysis;
+  verifiedInvestigationResult?: VerifiedInvestigationResult;
 }
 
 interface EvaluationSession {
@@ -203,10 +205,24 @@ function parseInvestigation(
   expectedRunId: string | undefined,
 ): InvestigationData {
   const data = isRecord(value) ? value.data : undefined;
+  const dataKeys = isRecord(data) ? Object.keys(data).sort() : [];
+  const requiredDataKeys = [
+    "analysis",
+    "evidence",
+    "evidenceManifest",
+    "model",
+    "requestId",
+    "response",
+    "retrievedAt",
+    "runId",
+  ];
+  const allowedDataKeys = [...requiredDataKeys, "verifiedFactInventory", "verifiedInvestigationResult"];
   if (
     !isRecord(data) ||
-    Object.keys(data).sort().join(",") !==
-      "analysis,evidence,evidenceManifest,model,requestId,response,retrievedAt,runId" ||
+    !requiredDataKeys.every((key) => dataKeys.includes(key)) ||
+    dataKeys.some((key) => !allowedDataKeys.includes(key)) ||
+    (data.verifiedFactInventory !== undefined && !isRecord(data.verifiedFactInventory)) ||
+    (data.verifiedInvestigationResult !== undefined && !isRecord(data.verifiedInvestigationResult)) ||
     typeof data.model !== "string" ||
     typeof data.response !== "string" ||
     !isUuid(data.runId) ||
@@ -250,6 +266,9 @@ function parseInvestigation(
     requestId,
     retrievedAt: data.retrievedAt,
     analysis,
+    ...(data.verifiedInvestigationResult
+      ? { verifiedInvestigationResult: data.verifiedInvestigationResult as unknown as VerifiedInvestigationResult }
+      : {}),
   };
 }
 
@@ -544,6 +563,7 @@ async function runEvaluation(
         evidenceManifest: investigation.evidenceManifest,
         response: investigation.response,
         analysis: investigation.analysis,
+        verifiedInvestigationResult: investigation.verifiedInvestigationResult ?? null,
         ingestion: skipIngestion ? "skipped" : "completed",
         timings: {
           warmupMs: warmupDurationMs,

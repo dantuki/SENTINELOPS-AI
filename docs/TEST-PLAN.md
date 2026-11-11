@@ -621,3 +621,74 @@ autoridad fail-closed. Las pruebas locales cubren la función pura,
 idempotencia, entradas adversariales, trazabilidad y que el Evaluator V2
 recibe las mismas métricas después de la deduplicación autorizada. Esta
 corrección no ejecuta INC-001 ni cierra ninguno de sus gates.
+
+### Operation Bullseye — motor de hechos verificados — 10 de noviembre de 2026
+
+Se añadió `verified-fact-inventory-v1` como una representación determinista
+separada de la respuesta generativa. Solo extrae valores escalares de registros
+JSONL completos después de que la traza, hashes, proyecto, documento, fuente,
+scope e identidad de recuperación hayan sido atestados. Cada hecho conserva
+identidad del registro, alias de evidencia, contexto, offsets, hash del
+registro, tipo y unidad conocida; los eventos repetidos no se deduplican. Los
+campos sensibles no se incluyen. Código TypeScript se clasifica únicamente
+como soporte estático contextual y nunca como ejecución runtime.
+
+El Evaluator V2 consume ese inventario y publica `verifiedFactCoverage` por
+separado de `answerCoverage` y `finalResultCoverage`: los hechos deterministas
+no elevan la cobertura de afirmaciones que el modelo omitió. La API PostgreSQL
+atesta la traza antes de enviar una vista compacta de hechos al modelo; la
+evidencia original y el inventario completo permanecen separados en el
+resultado y el reporte. Los adaptadores en memoria no se presentan como
+attestation SQL.
+
+| Comprobación | Resultado verificable |
+|---|---|
+| API + harness determinista de hechos | 157 aprobadas, 0 fallidas |
+| Pruebas Python del orquestador | 35 aprobadas, 0 fallidas |
+| Typecheck API y runner; build API | PASS |
+| Typecheck y build web | PASS |
+| Preflight aislado | PASS; no creó recursos |
+| Evaluación real `06b42265a67fb4d8c634cadf4b583127` | Falló antes de inferencia con HTTP 422 por tamaño de prompt; cleanup verificado |
+| Evaluación real `17205d44fe4662ebbaf1f27416ae322e` | HTTP 422 resuelto: Ollama respondió y el reporte V2 se generó; fallo de calidad, no de infraestructura; cleanup verificado |
+
+El reporte de ese intento se conserva. Se compactó el contexto enviado a
+Ollama sin suprimir hechos ni procedencia, pero una segunda evaluación completa
+requiere una autorización explícita adicional por la restricción previa contra
+reintentos. El Reliability Gate y Phase 3.1 permanecen abiertos.
+
+Tras la autorización limitada posterior se ejecutó una sola evaluación adicional
+aislada. La traza y las dos evidencias quedaron atestadas, `retrievalRecall` y
+`verifiedFactCoverage` fueron 1, pero el modelo generó hechos genéricos que no
+preservaron los componentes observados; `answerCoverage` y
+`finalResultCoverage` fueron 0, por lo que el reporte V2 no fue aceptado. El
+protocolo de composición ahora exige un hecho atómico por registro runtime con
+nombres y valores literales de sus campos. La regresión confirma que la
+proyección compacta retiene alias, identidad de evento, hash y offsets, campos
+tipados y ceros, sin incluir el contenido bruto del documento. Esta corrección
+no se ha revalidado mediante otra inferencia real y no cierra ningún gate.
+
+### Operation Bullseye — resultado público Evidence-First
+
+`verified-investigation-result-v1` separa explícitamente
+`verifiedObservations` de `aiAnalysis`. Las observaciones públicas proceden
+solamente de `verified-fact-inventory-v1` atestado y conservan identidad,
+proyecto, incidente, evidencia, evento, locator/hash, tipo, unidad y valor.
+El análisis AI solo se marca `validated` tras validar el contrato; su omisión o
+fallo no elimina hechos verificados ni los atribuye al modelo. El frontend los
+presenta como una sección distinta.
+
+El Evaluator V2 conserva `answerCoverage` y el Reliability Gate históricos.
+`finalResultCoverage` se calcula ahora desde el resultado público solamente
+cuando todos los hechos presentados coinciden exactamente con el inventario
+atestado. El `evidence-first-product-investigation-gate-v1` se publica por
+separado; no convierte un FAIL del gate histórico en PASS.
+
+La única evaluación real posterior fue
+`1c1ff3f189c2c9b9f21b93e101d2b23e` (trace
+`3d83bd66-7e09-4b9d-84f3-1ae87ca698db`). Confirmó que el resultado público
+serializado contenía los hechos atestados: `retrievalRecall=1`,
+`verifiedFactCoverage=1`, `answerCoverage=0` y `finalResultCoverage=1`. El
+Reliability Gate histórico siguió en FAIL. Después del run se endureció el gate
+de producto para rechazar alias/procedencia alterados y causalidad afirmada
+fuera de hipótesis; esa corrección queda cubierta por pruebas deterministas y
+no se sometió a otra inferencia real.

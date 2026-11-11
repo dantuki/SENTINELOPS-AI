@@ -11,6 +11,7 @@ import {
   renderInvestigationAnalysis,
   type InvestigationAnalysis,
 } from "../src/investigation-analysis.js";
+import type { VerifiedInvestigationResult } from "../src/verified-investigation-result.js";
 import {
   hashChunkContent,
   isUuid,
@@ -410,6 +411,7 @@ const CANDIDATE_KEYS = [
   "evidenceManifest",
   "response",
   "analysis",
+  "verifiedInvestigationResult",
   "ingestion",
   "timings",
   "abstained",
@@ -423,6 +425,21 @@ const VERIFIED_REPORT_KEYS = [
   "evaluation",
   "passed",
 ] as const;
+
+const LEGACY_CANDIDATE_KEYS = CANDIDATE_KEYS.filter(
+  (key) => key !== "verifiedInvestigationResult",
+);
+const LEGACY_VERIFIED_REPORT_KEYS = VERIFIED_REPORT_KEYS.filter(
+  (key) => key !== "verifiedInvestigationResult",
+);
+
+function hasCandidateKeys(value: Record<string, unknown>): boolean {
+  return hasExactKeys(value, CANDIDATE_KEYS) || hasExactKeys(value, LEGACY_CANDIDATE_KEYS);
+}
+
+function hasVerifiedReportKeys(value: Record<string, unknown>): boolean {
+  return hasExactKeys(value, VERIFIED_REPORT_KEYS) || hasExactKeys(value, LEGACY_VERIFIED_REPORT_KEYS);
+}
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -454,6 +471,7 @@ interface EvaluationCandidate {
   evidenceManifest: EvidenceManifestItem[];
   response: string;
   analysis: InvestigationAnalysis;
+  verifiedInvestigationResult?: VerifiedInvestigationResult;
   ingestion: "skipped" | "completed";
   timings: {
     warmupMs: number;
@@ -644,7 +662,7 @@ function parseCandidate(
     return null;
   }
   if (
-    !hasExactKeys(value, CANDIDATE_KEYS) ||
+    !hasCandidateKeys(value) ||
     value.reportType !== "inc001-candidate-v1" ||
     value.dataset !== "sentinelops-synthetic-demo-v1" ||
     value.incidentId !== "INC-001" ||
@@ -660,6 +678,7 @@ function parseCandidate(
     Number(value.evidenceCount) > 5 ||
     typeof value.response !== "string" ||
     value.response.length === 0 ||
+    (value.verifiedInvestigationResult !== undefined && value.verifiedInvestigationResult !== null && !isRecord(value.verifiedInvestigationResult)) ||
     (value.ingestion !== "skipped" && value.ingestion !== "completed") ||
     typeof value.abstained !== "boolean" ||
     typeof value.referenceLeaked !== "boolean" ||
@@ -730,6 +749,9 @@ function parseCandidate(
     evidenceManifest: manifest,
     response: value.response,
     analysis,
+    ...(isRecord(value.verifiedInvestigationResult)
+      ? { verifiedInvestigationResult: value.verifiedInvestigationResult as unknown as VerifiedInvestigationResult }
+      : {}),
     ingestion: value.ingestion,
     timings: {
       warmupMs: value.timings.warmupMs,
@@ -816,6 +838,7 @@ function createVerifiedReport(
     manifest: candidate.evidenceManifest,
     trace: traceVerification,
     groundTruth,
+    publicResult: candidate.verifiedInvestigationResult,
   });
   const evidence = candidate.evidenceManifest.map<Inc001Evidence>((item) => ({
     id: item.chunkId,
@@ -933,7 +956,7 @@ export function summarizeEvaluationOutput(
     const value: unknown = JSON.parse(stdout);
     const parsed =
       isRecord(value) &&
-      hasExactKeys(value, VERIFIED_REPORT_KEYS) &&
+      hasVerifiedReportKeys(value) &&
       value.reportType === "inc001-verified-v2" &&
       typeof value.runId === "string" &&
       isUuid(value.runId) &&
@@ -956,6 +979,9 @@ export function summarizeEvaluationOutput(
               evidenceManifest: value.evidenceManifest,
               response: value.response,
               analysis: value.analysis,
+              ...("verifiedInvestigationResult" in value
+                ? { verifiedInvestigationResult: value.verifiedInvestigationResult }
+                : {}),
               ingestion: value.ingestion,
               timings: value.timings,
               abstained: value.abstained,

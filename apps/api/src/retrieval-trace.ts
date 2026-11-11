@@ -39,6 +39,8 @@ export interface CreateRetrievalTraceInput {
 
 export interface RetrievalTraceStore {
   createTrace(input: CreateRetrievalTraceInput): Promise<void>;
+  /** Available only to the production store after its transaction commits. */
+  getVerificationPool?(): Pick<Pool, "query">;
 }
 
 const UUID_PATTERN =
@@ -151,6 +153,10 @@ export function buildEvidenceManifest(
 
 export class PostgresRetrievalTraceStore implements RetrievalTraceStore {
   constructor(private readonly pool: Pool) {}
+
+  getVerificationPool(): Pick<Pool, "query"> {
+    return this.pool;
+  }
 
   async createTrace(input: CreateRetrievalTraceInput): Promise<void> {
     validateTraceInput(input);

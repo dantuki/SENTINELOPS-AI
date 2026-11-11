@@ -1525,6 +1525,13 @@ test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {
   assert.equal(obs02?.status, "complete");
   assert.equal(obs05?.status, "complete");
   assert.equal(obs05?.coveredComponents.includes("pool-waiting:18"), false);
+  assert.equal(result.metrics.verifiedFactCoverage, 1);
+  assert.equal(result.metrics.finalResultCoverage, result.metrics.answerCoverage);
+  assert.ok(
+    result.verifiedFactInventory.facts.some(
+      ({ property, value }) => property === "idle_connections" && value === 0,
+    ),
+  );
 });
 
 test("V2 recognizes queue-depth and pool-timeout paraphrases without accepting adjacent properties", () => {

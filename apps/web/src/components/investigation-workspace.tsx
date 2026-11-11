@@ -86,6 +86,23 @@ interface InvestigationResult {
   response: string;
   evidence: Evidence[];
   analysis: InvestigationAnalysis;
+  verifiedInvestigationResult?: VerifiedInvestigationResult;
+}
+
+interface VerifiedInvestigationResult {
+  version: "verified-investigation-result-v1";
+  verifiedObservations: Array<{
+    evidenceAlias: string;
+    eventId: string;
+    property: string;
+    value: string | number | boolean | null;
+    unit: string | null;
+    verificationStatus: "verified";
+  }>;
+  aiAnalysis: {
+    status: "validated" | "not_invoked" | "invalid";
+    failure: string;
+  };
 }
 
 interface TimelineEvent {
@@ -266,6 +283,18 @@ function isInvestigationAnalysis(
   );
 }
 
+function isVerifiedInvestigationResult(value: unknown): value is VerifiedInvestigationResult {
+  return isRecord(value) && value.version === "verified-investigation-result-v1" &&
+    Array.isArray(value.verifiedObservations) &&
+    value.verifiedObservations.every((observation) =>
+      isRecord(observation) && typeof observation.evidenceAlias === "string" &&
+      typeof observation.eventId === "string" && typeof observation.property === "string" &&
+      (["string", "number", "boolean"].includes(typeof observation.value) || observation.value === null),
+    ) && isRecord(value.aiAnalysis) &&
+    ["validated", "not_invoked", "invalid"].includes(String(value.aiAnalysis.status)) &&
+    typeof value.aiAnalysis.failure === "string";
+}
+
 function isInvestigationResult(
   value: unknown,
 ): value is InvestigationResult {
@@ -275,7 +304,8 @@ function isInvestigationResult(
     typeof value.response === "string" &&
     Array.isArray(value.evidence) &&
     value.evidence.every(isEvidence) &&
-    isInvestigationAnalysis(value.analysis, value.evidence.length)
+    isInvestigationAnalysis(value.analysis, value.evidence.length) &&
+    (value.verifiedInvestigationResult === undefined || isVerifiedInvestigationResult(value.verifiedInvestigationResult))
   );
 }
 
@@ -1288,6 +1318,24 @@ export function InvestigationWorkspace() {
                           producción.
                         </span>
                       </div>
+                    ) : null}
+
+                    {result.verifiedInvestigationResult ? (
+                      <section className="response-section" aria-labelledby="verified-observations-title">
+                        <h4 id="verified-observations-title">Hechos verificados</h4>
+                        <p>
+                          {result.verifiedInvestigationResult.aiAnalysis.status === "validated"
+                            ? "Estos valores provienen de evidencia atestada; el análisis AI se muestra por separado."
+                            : "El análisis AI no está validado; se presentan únicamente los hechos atestados."}
+                        </p>
+                        <ul>
+                          {result.verifiedInvestigationResult.verifiedObservations.map((observation) => (
+                            <li key={`${observation.eventId}:${observation.property}`}>
+                              <code>{observation.property}</code>: {String(observation.value)}{observation.unit ? ` ${observation.unit}` : ""} [{observation.evidenceAlias}]
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
                     ) : null}
 
                     <div className="response-sections">
