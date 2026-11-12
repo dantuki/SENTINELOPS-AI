@@ -34,7 +34,11 @@ import {
   type Inc001GroundTruth,
 } from "../src/inc001-evaluation.js";
 import { renderInvestigationAnalysis } from "../src/investigation-analysis.js";
-import { normalizeInvestigationCitationDuplicates } from "../src/investigation-routes.js";
+import { composeVerifiedInvestigationResult } from "../src/verified-investigation-result.js";
+import {
+  invalidGeneratedAnalysis,
+  normalizeInvestigationCitationDuplicates,
+} from "../src/investigation-routes.js";
 import {
   hashChunkContent,
   type EvidenceManifestItem,
@@ -1532,6 +1536,60 @@ test("V2 keeps OBS-02 and OBS-05 measurements in distinct contexts", () => {
       ({ property, value }) => property === "idle_connections" && value === 0,
     ),
   );
+});
+
+test("Product Gate accepts a complete serialized result and rejects analysis substitution or causal claims", () => {
+  const inventory = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis), analysis: completeAnalysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+  }).verifiedFactInventory;
+  const publicResult = composeVerifiedInvestigationResult({
+    inventory, analysis: completeAnalysis, analysisStatus: "validated",
+  });
+  const accepted = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis), analysis: completeAnalysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth, publicResult,
+  });
+  assert.equal(accepted.productGate.passed, true);
+  assert.equal(accepted.productGate.analysisMatchesPublicResult, true);
+
+  const substituted = {
+    ...publicResult,
+    aiAnalysis: { ...publicResult.aiAnalysis, analysis: { ...completeAnalysis, summary: "Un resumen distinto." } },
+  };
+  const rejectedSubstitution = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis), analysis: completeAnalysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth, publicResult: substituted,
+  });
+  assert.equal(rejectedSubstitution.productGate.passed, false);
+  assert.equal(rejectedSubstitution.productGate.analysisMatchesPublicResult, false);
+
+  const causalAnalysis = { ...completeAnalysis, summary: "La saturación del pool causó el HTTP 500." };
+  const rejectedCausality = evaluateInc001V2({
+    response: renderInvestigationAnalysis(causalAnalysis), analysis: causalAnalysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+    publicResult: composeVerifiedInvestigationResult({ inventory, analysis: causalAnalysis, analysisStatus: "validated" }),
+  });
+  assert.equal(rejectedCausality.productGate.passed, false);
+});
+
+test("V2 preserves verified facts but fails both gates when generation is explicitly invalid", () => {
+  const inventory = evaluateInc001V2({
+    response: renderInvestigationAnalysis(completeAnalysis), analysis: completeAnalysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+  }).verifiedFactInventory;
+  const analysis = invalidGeneratedAnalysis();
+  const result = evaluateInc001V2({
+    response: renderInvestigationAnalysis(analysis), analysis,
+    manifest: evaluationManifest, trace: verifiedTrace, groundTruth: evaluationGroundTruth,
+    publicResult: composeVerifiedInvestigationResult({
+      inventory, analysis: null, analysisStatus: "invalid", failure: "contract_invalid",
+    }),
+  });
+  assert.equal(result.metrics.finalResultCoverage, 1);
+  assert.equal(result.productGate.generativeAnalysisStatus, "invalid");
+  assert.equal(result.productGate.passed, false);
+  assert.equal(result.accepted, false);
 });
 
 test("V2 recognizes queue-depth and pool-timeout paraphrases without accepting adjacent properties", () => {

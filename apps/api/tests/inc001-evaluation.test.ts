@@ -181,6 +181,16 @@ test("INC-001 evaluator detects the specified factuality errors", () => {
   });
 });
 
+test("INC-001 evaluator rejects inverse and root-cause pool-causality formulations", () => {
+  for (const response of [
+    "The request failure was caused by the PostgreSQL connection pool saturation.",
+    "The incident is a cascading failure originating from the connection pool; the root cause appears to be saturation.",
+  ]) {
+    const result = evaluateInc001Response(response, [], groundTruth);
+    assert.ok(result.factualityViolations.some(({ id }) => id === "unproven-pool-root-cause"));
+  }
+});
+
 test("INC-001 evaluator does not flag explicit denials of unsupported claims", () => {
   const response = [
     "No hay evidencia de 18 transacciones bloqueadas.",

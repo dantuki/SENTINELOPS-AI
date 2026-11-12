@@ -225,7 +225,7 @@ const factualityRules: Array<{
     description:
       "Presenta la saturación del pool como causa definitiva del error HTTP 500.",
     pattern:
-      /(?:saturaci[oó]n (?:del|de) (?:pool|conexiones)|pool de conexiones)[\s\S]{0,100}(?:caus[oó]|provoc[oó]|origin[oó]|caused|triggered)[\s\S]{0,120}(?:http\s*500|falla|fallo|error)/iu,
+      /(?:saturaci[oó]n (?:del|de) (?:pool|conexiones)|pool de conexiones)[\s\S]{0,100}(?:caus[oó]|provoc[oó]|origin[oó]|caused|triggered)[\s\S]{0,120}(?:http\s*500|falla|fallo|error)|(?:http\s*500|falla|fallo|error|failure)[\s\S]{0,100}(?:causado\s+por|caused\s+by|root cause(?:\s+is)?|originating\s+from|direct\s+symptom\s+of|due\s+to)[\s\S]{0,120}(?:saturaci[oó]n|pool)|(?:root cause|causa ra[ií]z)[\s\S]{0,100}(?:saturaci[oó]n|pool)/iu,
   },
   {
     id: "unproven-retry-causality",

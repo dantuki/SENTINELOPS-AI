@@ -5,7 +5,9 @@ import { after, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import {
   analysisSchema,
+  analysisSchemaForEvidenceAliases,
   diagnoseInvestigationResponse,
+  invalidGeneratedAnalysis,
   normalizeInvestigationCitationDuplicates,
   registerInvestigationRoutes,
 } from "../src/investigation-routes.js";
@@ -55,6 +57,39 @@ const sharedInvestigationSchema: unknown = JSON.parse(
 
 test("Product API investigation schema matches the shared contract", () => {
   assert.deepEqual(analysisSchema, sharedInvestigationSchema);
+});
+
+test("model schema restricts citations and runtime-record cardinality per request", () => {
+  const constrained = analysisSchemaForEvidenceAliases(["E1", "E2", "E1"], 3, ["R1", "R2", "R3"]);
+  const encoded = JSON.stringify(constrained);
+  assert.equal(encoded.includes('"pattern":"^E[1-9][0-9]*$"'), false);
+  assert.ok(encoded.includes('"enum":["E1","E2"]'));
+  assert.ok(encoded.includes('"minItems":3'));
+  assert.ok(encoded.includes('"maxItems":3'));
+  assert.ok(encoded.includes('"enum":["R1","R2","R3"]'));
+  assert.throws(() => analysisSchemaForEvidenceAliases([]));
+  assert.throws(() => analysisSchemaForEvidenceAliases(["E1"], 0));
+});
+
+test("runtime event aliases reject a missing or duplicated generated record", () => {
+  const valid = JSON.parse(structuredInvestigationResponse()) as Record<string, unknown>;
+  valid.observed_facts = [
+    { event_id: "R1", claim: "Primer hecho.", evidence_refs: ["E1"] },
+    { event_id: "R2", claim: "Segundo hecho.", evidence_refs: ["E1"] },
+  ];
+  assert.deepEqual(diagnoseInvestigationResponse({ model: "test", response: JSON.stringify(valid) }, 1, ["R1", "R2"]), []);
+  valid.observed_facts = [
+    { event_id: "R1", claim: "Primer hecho.", evidence_refs: ["E1"] },
+    { event_id: "R1", claim: "Segundo hecho.", evidence_refs: ["E1"] },
+  ];
+  assert.ok(diagnoseInvestigationResponse({ model: "test", response: JSON.stringify(valid) }, 1, ["R1", "R2"]).some(({ code }) => code === "duplicate_runtime_event"));
+});
+
+test("invalid generated analysis contains no accepted generated observations", () => {
+  const analysis = invalidGeneratedAnalysis();
+  assert.deepEqual(analysis.observed_facts, []);
+  assert.equal(analysis.hypotheses[0]?.status, "insufficient_evidence");
+  assert.ok(analysis.limitations[0]?.includes("no contiene afirmaciones generadas aceptadas"));
 });
 
 test("candidate inventory preserves complete JSONL records without joining them", () => {

@@ -201,3 +201,11 @@ test("public verified result preserves zeroes and refuses altered project facts"
   result.verifiedObservations[0]!.evidenceAlias = "E999";
   assert.equal(hasCompletePresentedFacts(inventory, result), false);
 });
+
+test("public verified result rejects duplicate identities and malformed serialized data", () => {
+  const inventory = extract('{"incident_id":"INC-OTHER","event":"pool","idle_connections":0,"duration_ms":180}');
+  const result = composeVerifiedInvestigationResult({ inventory, analysis: null, analysisStatus: "invalid" });
+  result.verifiedObservations[1] = { ...result.verifiedObservations[0]! };
+  assert.equal(hasCompletePresentedFacts(inventory, result), false);
+  assert.equal(hasCompletePresentedFacts(inventory, { version: "verified-investigation-result-v1" }), false);
+});

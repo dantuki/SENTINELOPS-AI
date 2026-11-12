@@ -11,7 +11,10 @@ import {
   renderInvestigationAnalysis,
   type InvestigationAnalysis,
 } from "../src/investigation-analysis.js";
-import type { VerifiedInvestigationResult } from "../src/verified-investigation-result.js";
+import {
+  isVerifiedInvestigationResult,
+  type VerifiedInvestigationResult,
+} from "../src/verified-investigation-result.js";
 import {
   hashChunkContent,
   isUuid,
@@ -508,14 +511,16 @@ function parseEvaluationAnalysis(value: unknown): InvestigationAnalysis | null {
   for (const fact of value.observed_facts) {
     if (
       !isRecord(fact) ||
-      !hasExactKeys(fact, ["claim", "evidence_refs"]) ||
+      !(hasExactKeys(fact, ["claim", "evidence_refs"]) || hasExactKeys(fact, ["event_id", "claim", "evidence_refs"])) ||
       typeof fact.claim !== "string" ||
       !fact.claim.trim() ||
-      !isStringArray(fact.evidence_refs)
+      !isStringArray(fact.evidence_refs) ||
+      (Object.hasOwn(fact, "event_id") && (typeof fact.event_id !== "string" || !fact.event_id.trim()))
     ) {
       return null;
     }
     observedFacts.push({
+      ...(typeof fact.event_id === "string" ? { event_id: fact.event_id } : {}),
       claim: fact.claim,
       evidence_refs: fact.evidence_refs,
     });
@@ -678,7 +683,7 @@ function parseCandidate(
     Number(value.evidenceCount) > 5 ||
     typeof value.response !== "string" ||
     value.response.length === 0 ||
-    (value.verifiedInvestigationResult !== undefined && value.verifiedInvestigationResult !== null && !isRecord(value.verifiedInvestigationResult)) ||
+    (value.verifiedInvestigationResult !== undefined && value.verifiedInvestigationResult !== null && !isVerifiedInvestigationResult(value.verifiedInvestigationResult)) ||
     (value.ingestion !== "skipped" && value.ingestion !== "completed") ||
     typeof value.abstained !== "boolean" ||
     typeof value.referenceLeaked !== "boolean" ||
@@ -749,8 +754,8 @@ function parseCandidate(
     evidenceManifest: manifest,
     response: value.response,
     analysis,
-    ...(isRecord(value.verifiedInvestigationResult)
-      ? { verifiedInvestigationResult: value.verifiedInvestigationResult as unknown as VerifiedInvestigationResult }
+    ...(isVerifiedInvestigationResult(value.verifiedInvestigationResult)
+      ? { verifiedInvestigationResult: value.verifiedInvestigationResult }
       : {}),
     ingestion: value.ingestion,
     timings: {

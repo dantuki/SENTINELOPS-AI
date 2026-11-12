@@ -21,6 +21,11 @@
       "items": {
         "type": "object",
         "properties": {
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
           "claim": {
             "type": "string",
             "minLength": 1,

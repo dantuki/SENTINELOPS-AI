@@ -14,7 +14,10 @@ import {
   isUuid,
   type EvidenceManifestItem,
 } from "./retrieval-trace.js";
-import type { VerifiedInvestigationResult } from "./verified-investigation-result.js";
+import {
+  isVerifiedInvestigationResult,
+  type VerifiedInvestigationResult,
+} from "./verified-investigation-result.js";
 
 interface InvestigationData {
   model: string;
@@ -94,13 +97,14 @@ function parseInvestigationAnalysis(value: unknown): InvestigationAnalysis {
   const observedFacts = value.observed_facts.map((fact) => {
     if (
       !isRecord(fact) ||
-      Object.keys(fact).sort().join(",") !== "claim,evidence_refs" ||
+      !(["claim,evidence_refs", "claim,event_id,evidence_refs"].includes(Object.keys(fact).sort().join(","))) ||
       typeof fact.claim !== "string" ||
-      !isStringArray(fact.evidence_refs)
+      !isStringArray(fact.evidence_refs) ||
+      (Object.hasOwn(fact, "event_id") && typeof fact.event_id !== "string")
     ) {
       throw new Error("Investigation fact has an invalid shape.");
     }
-    return { claim: fact.claim, evidence_refs: fact.evidence_refs };
+    return { ...(typeof fact.event_id === "string" ? { event_id: fact.event_id } : {}), claim: fact.claim, evidence_refs: fact.evidence_refs };
   });
   const allowedStatuses = new Set([
     "supported_unconfirmed",
@@ -222,7 +226,7 @@ function parseInvestigation(
     !requiredDataKeys.every((key) => dataKeys.includes(key)) ||
     dataKeys.some((key) => !allowedDataKeys.includes(key)) ||
     (data.verifiedFactInventory !== undefined && !isRecord(data.verifiedFactInventory)) ||
-    (data.verifiedInvestigationResult !== undefined && !isRecord(data.verifiedInvestigationResult)) ||
+    (data.verifiedInvestigationResult !== undefined && !isVerifiedInvestigationResult(data.verifiedInvestigationResult)) ||
     typeof data.model !== "string" ||
     typeof data.response !== "string" ||
     !isUuid(data.runId) ||
@@ -267,7 +271,7 @@ function parseInvestigation(
     retrievedAt: data.retrievedAt,
     analysis,
     ...(data.verifiedInvestigationResult
-      ? { verifiedInvestigationResult: data.verifiedInvestigationResult as unknown as VerifiedInvestigationResult }
+      ? { verifiedInvestigationResult: data.verifiedInvestigationResult }
       : {}),
   };
 }

@@ -689,6 +689,13 @@ async def generate_local_chat(
                 "ni evidencias. No declares una causa raiz sin pruebas "
                 "suficientes. Si falta informacion, indica que "
                 "comprobaciones permitirian obtenerla. "
+                "En una respuesta JSON de investigacion, conserva los "
+                "valores y la separacion de cada evento suministrado; no "
+                "resumas varias mediciones en una etiqueta generica. No "
+                "presentes una relacion causal como un hecho observado ni "
+                "uses 'cause', 'caused', 'root cause', 'causa raiz', "
+                "'causo' o 'provoco' fuera de una hipotesis expresamente "
+                "no confirmada. "
                 "Responde en espanol de forma clara y tecnica."
             ),
         },

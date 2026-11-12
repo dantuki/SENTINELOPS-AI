@@ -123,6 +123,7 @@ export interface Inc001EvaluationV2 {
     version: "evidence-first-product-investigation-gate-v1";
     passed: boolean;
     presentedFactsComplete: boolean;
+    analysisMatchesPublicResult: boolean;
     generativeAnalysisStatus: VerifiedInvestigationResult["aiAnalysis"]["status"] | "absent";
   };
 }
@@ -452,6 +453,8 @@ export function evaluateInc001V2(input: {
   const retrievalComplete = observationMatrix.filter(({ status }) => status !== "not_evaluable" && status !== "blocked").length;
   const coverageComplete = observationMatrix.filter(({ status }) => status === "complete").length;
   const presentedFactsComplete = hasCompletePresentedFacts(verifiedFactInventory, input.publicResult);
+  const analysisMatchesPublicResult = input.publicResult?.aiAnalysis.analysis !== null &&
+    JSON.stringify(input.publicResult?.aiAnalysis.analysis) === JSON.stringify(input.analysis);
   const finalResultCoverage = presentedFactsComplete
     ? (OBSERVATIONS.length === 0 ? 0 : retrievalComplete / OBSERVATIONS.length)
     : (OBSERVATIONS.length === 0 ? 0 : coverageComplete / OBSERVATIONS.length);
@@ -485,9 +488,12 @@ export function evaluateInc001V2(input: {
     productGate: {
       version: "evidence-first-product-investigation-gate-v1",
       passed: traceVerified && presentedFactsComplete && finalResultCoverage === 1 &&
-        factualityViolations.length === 0 && !confirmedCausalityPresented && !referenceLeaked &&
+        citationValidity.invalid === 0 && citationValidity.notEvaluable === 0 && unsupported === 0 &&
+        factualityViolations.length === 0 && contradictions.length === 0 && !confirmedCausalityPresented && !referenceLeaked &&
+        analysisMatchesPublicResult &&
         input.publicResult?.aiAnalysis.status === "validated",
       presentedFactsComplete,
+      analysisMatchesPublicResult,
       generativeAnalysisStatus: input.publicResult?.aiAnalysis.status ?? "absent",
     },
   };

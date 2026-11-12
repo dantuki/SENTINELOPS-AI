@@ -5,6 +5,8 @@ export type HypothesisStatus =
   | "insufficient_evidence";
 
 export interface ObservedFact {
+  /** Present only when a verified runtime inventory required a record alias. */
+  event_id?: string;
   claim: string;
   evidence_refs: string[];
 }
@@ -46,7 +48,7 @@ export function renderInvestigationAnalysis(
     section(
       "Hechos respaldados por evidencia",
       analysis.observed_facts.map(
-        (fact) => `${fact.claim}${formatReferences(fact.evidence_refs)}`,
+        (fact) => `${fact.event_id ? `${fact.event_id}: ` : ""}${fact.claim}${formatReferences(fact.evidence_refs)}`,
       ),
     ),
     section(

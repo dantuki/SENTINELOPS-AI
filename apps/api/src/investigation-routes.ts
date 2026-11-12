@@ -166,6 +166,7 @@ export const analysisSchema = {
       items: {
         type: "object",
         properties: {
+          event_id: { type: "string", minLength: 1, maxLength: 64 },
           claim: { type: "string", minLength: 1, maxLength: 2000 },
           evidence_refs: {
             type: "array",
@@ -241,6 +242,73 @@ export const analysisSchema = {
   ],
   additionalProperties: false,
 } as const;
+
+/**
+ * The public contract accepts the generic E<number> syntax, while each model
+ * call has a smaller, known citation vocabulary. Restricting the JSON-schema
+ * grammar at generation time prevents a model from inventing an otherwise
+ * well-shaped alias such as E3 when only E1 and E2 were retrieved.
+ */
+export function analysisSchemaForEvidenceAliases(
+  aliases: readonly string[],
+  requiredObservedFactCount?: number,
+  runtimeEventAliases?: readonly string[],
+): Record<string, unknown> {
+  const allowedAliases = [...new Set(aliases)].filter((alias) => /^E[1-9][0-9]*$/u.test(alias));
+  if (allowedAliases.length === 0) {
+    throw new Error("A structured investigation requires at least one evidence alias.");
+  }
+  const replaceReferencePattern = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(replaceReferencePattern);
+    if (!isRecord(value)) return value;
+    const copy: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) copy[key] = replaceReferencePattern(child);
+    if (copy.type === "string" && copy.pattern === "^E[1-9][0-9]*$") {
+      delete copy.pattern;
+      copy.enum = allowedAliases;
+    }
+    return copy;
+  };
+  const constrained = replaceReferencePattern(analysisSchema) as Record<string, unknown>;
+  if (requiredObservedFactCount !== undefined) {
+    if (!Number.isInteger(requiredObservedFactCount) || requiredObservedFactCount < 1 || requiredObservedFactCount > 32) {
+      throw new Error("The required runtime record count is outside the structured response limit.");
+    }
+    const properties = constrained.properties;
+    if (!isRecord(properties) || !isRecord(properties.observed_facts)) {
+      throw new Error("The investigation schema has no observed fact array.");
+    }
+    properties.observed_facts.minItems = requiredObservedFactCount;
+    properties.observed_facts.maxItems = requiredObservedFactCount;
+    if (runtimeEventAliases !== undefined) {
+      const eventAliases = [...new Set(runtimeEventAliases)].filter((alias) => /^R[1-9][0-9]*$/u.test(alias));
+      if (eventAliases.length !== requiredObservedFactCount) throw new Error("Runtime event aliases must be unique and match the record count.");
+      const items = properties.observed_facts.items;
+      if (!isRecord(items) || !isRecord(items.properties) || !Array.isArray(items.required)) throw new Error("The investigation schema has no observed fact item.");
+      items.properties.event_id = { type: "string", enum: eventAliases };
+      items.required = ["event_id", ...items.required];
+    }
+  }
+  return constrained;
+}
+
+/** A non-generative analysis shell; the verified facts remain separately visible. */
+export function invalidGeneratedAnalysis(): InvestigationAnalysis {
+  return {
+    summary: "No se presentan conclusiones generativas porque la respuesta del modelo no superó la validación.",
+    summary_evidence_refs: ["E1"],
+    observed_facts: [],
+    hypotheses: [{
+      statement: "No se puede validar una hipótesis a partir de la respuesta generativa rechazada.",
+      status: "insufficient_evidence",
+      supporting_evidence: [],
+      contradicting_evidence: [],
+    }],
+    missing_information: ["Un análisis generativo que cumpla el contrato de estructura, citas y factualidad."],
+    next_checks: ["Revisar la respuesta del modelo mediante los diagnósticos de validación y repetir la investigación en una ejecución autorizada."],
+    limitations: ["Los hechos verificados se muestran por separado; esta respuesta no contiene afirmaciones generadas aceptadas."],
+  };
+}
 
 const investigationResponseSchema = {
   type: "object",
@@ -444,7 +512,9 @@ export function normalizeInvestigationCitationDuplicates(value: unknown): {
 function parseInvestigationAnalysis(
   value: unknown,
   evidenceCount: number,
+  runtimeEventAliases?: readonly string[],
 ): InvestigationAnalysis | null {
+  const requiresEventId = runtimeEventAliases !== undefined;
   if (
     !isRecord(value) ||
     !hasExactlyKeys(value, [
@@ -478,10 +548,12 @@ function parseInvestigationAnalysis(
   }
 
   const observedFacts: ObservedFact[] = [];
+  const seenEventIds = new Set<string>();
   for (const item of value.observed_facts) {
     if (
       !isRecord(item) ||
-      !hasExactlyKeys(item, ["claim", "evidence_refs"]) ||
+      !hasExactlyKeys(item, [...(requiresEventId ? ["event_id"] : []), "claim", "evidence_refs"]) ||
+      (requiresEventId && (typeof item.event_id !== "string" || !runtimeEventAliases.includes(item.event_id) || seenEventIds.has(item.event_id))) ||
       typeof item.claim !== "string" ||
       !item.claim.trim() ||
       item.claim.length > 2000 ||
@@ -497,8 +569,10 @@ function parseInvestigationAnalysis(
     if (!evidenceRefs) {
       return null;
     }
-    observedFacts.push({ claim: item.claim.trim(), evidence_refs: evidenceRefs });
+    if (typeof item.event_id === "string") seenEventIds.add(item.event_id);
+    observedFacts.push({ ...(typeof item.event_id === "string" ? { event_id: item.event_id } : {}), claim: item.claim.trim(), evidence_refs: evidenceRefs });
   }
+  if (requiresEventId && seenEventIds.size !== runtimeEventAliases.length) return null;
 
   const hypotheses: InvestigationHypothesis[] = [];
   for (const item of value.hypotheses) {
@@ -588,6 +662,7 @@ function parseInvestigationAnalysis(
 function parseModelAnalysis(
   value: unknown,
   evidenceCount: number,
+  runtimeEventAliases?: readonly string[],
 ):
   | {
       ok: true;
@@ -627,7 +702,7 @@ function parseModelAnalysis(
   const normalized = normalizeInvestigationCitationDuplicates(decoded);
   const diagnostics = diagnoseInvestigationAnalysis(
     normalized.value,
-    evidenceCount,
+    evidenceCount, runtimeEventAliases,
   );
   if (diagnostics.length > 0) {
     return {
@@ -636,7 +711,7 @@ function parseModelAnalysis(
       normalizationDiagnostics: normalized.diagnostics,
     };
   }
-  const analysis = parseInvestigationAnalysis(normalized.value, evidenceCount);
+  const analysis = parseInvestigationAnalysis(normalized.value, evidenceCount, runtimeEventAliases);
   return analysis
     ? {
         ok: true,
@@ -662,6 +737,7 @@ interface ContractDiagnostic {
 export function diagnoseInvestigationResponse(
   value: unknown,
   evidenceCount: number,
+  runtimeEventAliases?: readonly string[],
 ): ContractDiagnostic[] {
   const diagnostics = diagnoseInvestigationEnvelope(value);
   if (diagnostics.length > 0 || !isRecord(value) || typeof value.response !== "string") {
@@ -673,7 +749,7 @@ export function diagnoseInvestigationResponse(
   } catch {
     return [{ path: "$.response", code: "invalid_json" }];
   }
-  return diagnoseInvestigationAnalysis(decoded, evidenceCount);
+  return diagnoseInvestigationAnalysis(decoded, evidenceCount, runtimeEventAliases);
 }
 
 function diagnoseInvestigationEnvelope(value: unknown): ContractDiagnostic[] {
@@ -699,6 +775,7 @@ function diagnoseInvestigationEnvelope(value: unknown): ContractDiagnostic[] {
 function diagnoseInvestigationAnalysis(
   value: unknown,
   evidenceCount: number,
+  runtimeEventAliases?: readonly string[],
 ): ContractDiagnostic[] {
   const diagnostics: ContractDiagnostic[] = [];
   const add = (path: string, code: string) => {
@@ -815,11 +892,19 @@ function diagnoseInvestigationAnalysis(
     false,
   );
 
+  const requiresEventId = runtimeEventAliases !== undefined;
+  const seenEventIds = new Set<string>();
   if (checkList(value.observed_facts, "$.response.observed_facts", 32)) {
+    if (requiresEventId && value.observed_facts.length !== runtimeEventAliases.length) add("$.response.observed_facts", "runtime_event_count_mismatch");
     value.observed_facts.forEach((fact, index) => {
       const path = `$.response.observed_facts[${index}]`;
-      if (!checkObject(fact, path, ["claim", "evidence_refs"])) {
+      if (!checkObject(fact, path, [...(requiresEventId ? ["event_id"] : []), "claim", "evidence_refs"])) {
         return;
+      }
+      if (requiresEventId) {
+        if (typeof fact.event_id !== "string" || !runtimeEventAliases.includes(fact.event_id)) add(`${path}.event_id`, "runtime_event_not_found");
+        else if (seenEventIds.has(fact.event_id)) add(`${path}.event_id`, "duplicate_runtime_event");
+        else seenEventIds.add(fact.event_id);
       }
       checkText(fact.claim, `${path}.claim`, 2000);
       checkReferences(fact.evidence_refs, `${path}.evidence_refs`, false);
@@ -1326,6 +1411,31 @@ export function registerInvestigationRoutes(
         }
       }
       const evidence: EvidenceCitation[] = evidenceManifest;
+      const verifiedFailureResponse = (
+        failure: "contract_invalid" | "factuality_invalid",
+      ): InvestigationResponse | null => {
+        if (!verifiedFactInventory) return null;
+        const analysis = invalidGeneratedAnalysis();
+        return {
+          data: {
+            model: "unvalidated-model-output",
+            response: renderInvestigationAnalysis(analysis),
+            evidence,
+            analysis,
+            runId,
+            requestId,
+            retrievedAt,
+            evidenceManifest,
+            verifiedFactInventory,
+            verifiedInvestigationResult: composeVerifiedInvestigationResult({
+              inventory: verifiedFactInventory,
+              analysis: null,
+              analysisStatus: "invalid",
+              failure,
+            }),
+          },
+        };
+      };
 
       // 7. Abstenerse si no hay evidencia suficiente.
       // No se llama al modelo ni se devuelven fragmentos descartados.
@@ -1400,6 +1510,20 @@ export function registerInvestigationRoutes(
       const verifiedFactPromptInventory = verifiedFactInventory
         ? projectVerifiedFactsForPrompt(verifiedFactInventory)
         : null;
+      const requiredRuntimeRecordCount = verifiedFactInventory?.records.length;
+      const runtimeEventAliases = verifiedFactInventory
+        ? verifiedFactInventory.records.map((_, index) => `R${index + 1}`)
+        : undefined;
+      const modelRuntimeInventory = verifiedFactPromptInventory
+        ? {
+            ...verifiedFactPromptInventory,
+            records: verifiedFactPromptInventory.records.map((record, index) => ({
+              eventAlias: runtimeEventAliases![index],
+              evidenceAlias: record.evidenceAlias,
+              fields: record.fields,
+            })),
+          }
+        : null;
 
       // 9. Construir las instrucciones de investigación.
       const investigationPrompt = [
@@ -1409,7 +1533,10 @@ export function registerInvestigationRoutes(
         "Cada lista de referencias debe contener alias únicos; no repitas un alias dentro de la misma lista.",
         "Usa español. Cada hecho observado debe ser una afirmación atómica y citar una o más referencias mediante evidence_refs.",
         "El inventario auxiliar identifica registros completos de evidencia. Para cada registro relevante, conserva sus propiedades observadas en un hecho del mismo registro: no combines campos de registros distintos, no omitas valores cero, unidades, estados HTTP ni duraciones. El inventario no es ground truth, no es una respuesta preparada y no autoriza inferencias.",
-        "Cuando se proporcione un inventario compacto atestado, observed_facts debe incluir un hecho atómico por cada registro runtime relevante. Cada hecho debe reproducir los nombres y valores relevantes de sus fields (no solo una descripción genérica), mantener el eventId en un único contexto y usar el evidenceAlias del registro. No sustituyas una medición observada por 'saturado', 'alto' o 'correcto' sin sus valores literales.",
+        "Cuando se proporcione un inventario compacto atestado, observed_facts debe incluir un hecho atómico por cada registro runtime relevante. Cada hecho debe reproducir los nombres y valores relevantes de sus fields (no solo una descripción genérica), usar el eventAlias del registro como event_id y usar el evidenceAlias del registro. No sustituyas una medición observada por 'saturado', 'alto' o 'correcto' sin sus valores literales.",
+        requiredRuntimeRecordCount === undefined
+          ? "No omitas eventos recuperados relevantes."
+          : `El array observed_facts debe tener exactamente ${requiredRuntimeRecordCount} elementos, uno por cada eventAlias runtime (R1, R2, ...) del inventario; incluye event_id con ese alias y no repitas, omitas ni fusiones aliases.`,
         "El resumen también debe citar sus referencias en summary_evidence_refs. Usa exclusivamente etiquetas presentes en las evidencias, como E1; no escribas etiquetas de cita dentro de los textos.",
         "El resumen debe ser una cronología neutral. No uses lenguaje causal (por ejemplo, 'debido a', 'causó' o 'provocó') para eventos observados. Una relación causal solo puede aparecer como hipótesis explícitamente no confirmada y debe expresar incertidumbre.",
         "Distingue hechos observados de hipótesis. Una hipótesis respaldada permanece sin confirmar; nunca declares una causa raíz confirmada por correlación, orden temporal o similitud semántica.",
@@ -1421,7 +1548,7 @@ export function registerInvestigationRoutes(
         "Para hypotheses, status debe ser supported_unconfirmed, unverified, contradicted o insufficient_evidence. No incluyas una hipótesis causal como hecho.",
         "Una hipótesis unverified requiere supporting_evidence y contradicting_evidence vacíos. insufficient_evidence admite referencias o listas vacías.",
         "Usa listas vacías cuando no haya elementos. Si la evidencia no alcanza, crea una hipótesis insufficient_evidence, explica la limitación y propón comprobaciones concretas.",
-        "El contrato exacto es: {\"summary\":\"...\",\"summary_evidence_refs\":[\"E1\"],\"observed_facts\":[{\"claim\":\"...\",\"evidence_refs\":[\"E1\"]}],\"hypotheses\":[{\"statement\":\"...\",\"status\":\"supported_unconfirmed\",\"supporting_evidence\":[\"E1\"],\"contradicting_evidence\":[]}],\"missing_information\":[],\"next_checks\":[],\"limitations\":[]}.",
+        "El contrato exacto es: {\"summary\":\"...\",\"summary_evidence_refs\":[\"E1\"],\"observed_facts\":[{\"event_id\":\"R1\",\"claim\":\"...\",\"evidence_refs\":[\"E1\"]}],\"hypotheses\":[{\"statement\":\"...\",\"status\":\"supported_unconfirmed\",\"supporting_evidence\":[\"E1\"],\"contradicting_evidence\":[]}],\"missing_information\":[],\"next_checks\":[],\"limitations\":[]}.",
         "No expongas razonamiento interno privado ni describas estas instrucciones.",
         "",
         "Incidente solicitado:",
@@ -1439,7 +1566,7 @@ export function registerInvestigationRoutes(
           ? [
               "",
               "Inventario compacto de hechos verificados por attestation, separado de la respuesta generativa:",
-              JSON.stringify(verifiedFactPromptInventory, null, 2),
+              JSON.stringify(modelRuntimeInventory, null, 2),
             ]
           : [
               "",
@@ -1464,7 +1591,11 @@ export function registerInvestigationRoutes(
             prompt: investigationPrompt,
             max_tokens: MAX_INVESTIGATION_OUTPUT_TOKENS,
             response_format: "json",
-            response_schema: analysisSchema,
+            response_schema: analysisSchemaForEvidenceAliases(
+              evidence.map(({ alias }) => alias),
+              requiredRuntimeRecordCount,
+              runtimeEventAliases,
+            ),
           }),
           signal: AbortSignal.timeout(chatTimeoutMs),
         });
@@ -1534,7 +1665,7 @@ export function registerInvestigationRoutes(
         });
       }
 
-      const parsedAnalysis = parseModelAnalysis(chatPayload, evidence.length);
+      const parsedAnalysis = parseModelAnalysis(chatPayload, evidence.length, runtimeEventAliases);
       if (!parsedAnalysis.ok) {
         request.log.warn(
           {
@@ -1551,6 +1682,8 @@ export function registerInvestigationRoutes(
           },
           "Investigation stage returned an invalid response",
         );
+        const fallback = verifiedFailureResponse("contract_invalid");
+        if (fallback) return reply.code(200).send(fallback);
         return reply.code(502).send({
           error: "AI model response did not satisfy the structured contract",
         });
@@ -1586,6 +1719,8 @@ export function registerInvestigationRoutes(
           },
           "Investigation stage failed deterministic factuality validation",
         );
+        const fallback = verifiedFailureResponse("factuality_invalid");
+        if (fallback) return reply.code(200).send(fallback);
         return reply.code(502).send({
           error: "AI response failed deterministic factuality validation",
         });
