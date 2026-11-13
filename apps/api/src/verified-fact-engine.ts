@@ -93,10 +93,38 @@ export interface VerifiedFactInventory {
 export interface VerifiedFactPromptInventory {
   version: VerifiedFactInventory["version"];
   attestationStatus: VerifiedFactInventory["attestationStatus"];
-  records: Array<Pick<VerifiedFactRecord, "evidenceAlias" | "eventId" | "sourceLocator" | "fields">>;
+  records: VerifiedFactPromptRecord[];
   contextualArtifacts: Array<
     Pick<VerifiedContextualArtifact, "evidenceAlias" | "classification" | "limitation">
   >;
+}
+
+/**
+ * A compact, attested property that a model may repeat in an observed fact.
+ * `propertyId` is request-local and is never derived from a dataset label or
+ * an expected evaluation observation.
+ */
+export interface VerifiedFactPromptProperty {
+  propertyId: string;
+  property: string;
+  value: VerifiedFactValue;
+  valueType: VerifiedFact["valueType"];
+  unit: string | null;
+}
+
+/**
+ * The model-facing representation of one JSONL runtime record.  It keeps the
+ * original identity and provenance for server-side validation while exposing
+ * only an opaque event alias to the model.
+ */
+export interface VerifiedFactPromptRecord {
+  eventAlias: string;
+  eventId: string;
+  evidenceAlias: string;
+  fields: Record<string, VerifiedFactValue>;
+  properties: VerifiedFactPromptProperty[];
+  context: VerifiedFactContext;
+  sourceLocator: VerifiedFactSourceLocator;
 }
 
 export interface VerifiedFactExtractionInput {
@@ -119,11 +147,25 @@ export function projectVerifiedFactsForPrompt(
   return {
     version: inventory.version,
     attestationStatus: inventory.attestationStatus,
-    records: inventory.records.map((record) => ({
+    records: inventory.records.map((record, recordIndex) => ({
+      eventAlias: `R${recordIndex + 1}`,
       evidenceAlias: record.evidenceAlias,
       eventId: record.eventId,
-      sourceLocator: record.sourceLocator,
       fields: record.fields,
+      // Identity and envelope fields are represented separately as context.
+      // All remaining scalar properties must be generated explicitly when a
+      // runtime analysis is requested, including zeroes and units.
+      properties: Object.entries(record.fields)
+        .filter(([property]) => !["dataset", "incident_id", "event", "timestamp", "level", "service"].includes(property))
+        .map(([property, value], propertyIndex) => ({
+          propertyId: `P${recordIndex + 1}_${propertyIndex + 1}`,
+          property,
+          value,
+          valueType: valueType(value),
+          unit: unitForProperty(property),
+        })),
+      context: record.context,
+      sourceLocator: record.sourceLocator,
     })),
     contextualArtifacts: inventory.contextualArtifacts.map(
       ({ evidenceAlias, classification, limitation }) => ({

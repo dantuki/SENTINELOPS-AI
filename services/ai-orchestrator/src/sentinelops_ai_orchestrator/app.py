@@ -40,6 +40,7 @@ def get_chat_timeout_seconds() -> float:
     )
 
 INVESTIGATION_ANALYSIS_SCHEMA: dict[str, object] = {
+    "$id": "sentinelops/investigation-analysis-v2",
     "type": "object",
     "properties": {
         "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
@@ -55,6 +56,17 @@ INVESTIGATION_ANALYSIS_SCHEMA: dict[str, object] = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "event_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "property_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                        },
+                    },
                     "claim": {"type": "string", "minLength": 1, "maxLength": 2000},
                     "evidence_refs": {
                         "type": "array",
@@ -786,7 +798,7 @@ async def generate_local_chat(
     logger.info(
         "Local chat inference completed: model=%s request_ms=%.1f "
         "ollama_total_ms=%s model_load_ms=%s prompt_eval_ms=%s "
-        "generation_ms=%s prompt_tokens=%s generated_tokens=%s",
+        "generation_ms=%s prompt_tokens=%s generated_tokens=%s done_reason=%s",
         payload["model"],
         (time.perf_counter() - request_started) * 1000,
         _duration_ms(payload, "total_duration"),
@@ -795,6 +807,7 @@ async def generate_local_chat(
         _duration_ms(payload, "eval_duration"),
         payload.get("prompt_eval_count"),
         payload.get("eval_count"),
+        payload.get("done_reason"),
     )
 
     return (

@@ -511,7 +511,7 @@ function parseEvaluationAnalysis(value: unknown): InvestigationAnalysis | null {
   for (const fact of value.observed_facts) {
     if (
       !isRecord(fact) ||
-      !(hasExactKeys(fact, ["claim", "evidence_refs"]) || hasExactKeys(fact, ["event_id", "claim", "evidence_refs"])) ||
+      !(hasExactKeys(fact, ["claim", "evidence_refs"]) || hasExactKeys(fact, ["event_id", "claim", "evidence_refs"]) || hasExactKeys(fact, ["claim", "evidence_refs", "property_refs"]) || hasExactKeys(fact, ["event_id", "claim", "evidence_refs", "property_refs"])) ||
       typeof fact.claim !== "string" ||
       !fact.claim.trim() ||
       !isStringArray(fact.evidence_refs) ||
@@ -519,8 +519,11 @@ function parseEvaluationAnalysis(value: unknown): InvestigationAnalysis | null {
     ) {
       return null;
     }
+    const propertyRefs = Object.hasOwn(fact, "property_refs") ? parseEvaluationPropertyReferences(fact.property_refs) : undefined;
+    if (Object.hasOwn(fact, "property_refs") && !propertyRefs) return null;
     observedFacts.push({
       ...(typeof fact.event_id === "string" ? { event_id: fact.event_id } : {}),
+      ...(propertyRefs ? { property_refs: propertyRefs } : {}),
       claim: fact.claim,
       evidence_refs: fact.evidence_refs,
     });
@@ -569,6 +572,16 @@ function parseEvaluationAnalysis(value: unknown): InvestigationAnalysis | null {
     next_checks: value.next_checks,
     limitations: value.limitations,
   };
+}
+
+function parseEvaluationPropertyReferences(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) return null;
+  const parsed: string[] = [];
+  for (const reference of value) {
+    if (typeof reference !== "string" || !reference.trim() || reference.length > 64) return null;
+    parsed.push(reference.trim());
+  }
+  return parsed;
 }
 
 function parseManifest(

@@ -7,6 +7,11 @@ export type HypothesisStatus =
 export interface ObservedFact {
   /** Present only when a verified runtime inventory required a record alias. */
   event_id?: string;
+  /**
+   * Model-selected references to the attested properties used by this claim.
+   * They ground a claim but do not themselves count as a generated claim.
+   */
+  property_refs?: string[];
   claim: string;
   evidence_refs: string[];
 }

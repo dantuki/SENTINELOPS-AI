@@ -517,6 +517,7 @@ function createWindowsProcessHarness(options: {
   taskkillErrorCode?: string;
   descendants?: number[] | null;
   descendantsSequence?: Array<number[] | null>;
+  processRunning?: boolean | null;
   closeOnTaskkill?: boolean;
 } = {}): {
   managed: ManagedProcess;
@@ -567,6 +568,9 @@ function createWindowsProcessHarness(options: {
         return value ?? null;
       }
       return options.descendants === undefined ? [] : options.descendants;
+    },
+    isWindowsProcessRunning() {
+      return options.processRunning ?? null;
     },
     killProcessGroup() {
       throw new Error("Windows lifecycle must not use Unix process groups.");
@@ -622,6 +626,13 @@ test("ManagedProcess.stop exercises Windows taskkill, close and descendant verif
   });
   assert.equal(await unavailableDescendants.managed.stop(), "unknown");
   assert.deepEqual(unavailableDescendants.calls.inspectedPids, [4321, 4321]);
+
+  const rootConfirmedGone = createWindowsProcessHarness({
+    closeOnTaskkill: true,
+    descendants: null,
+    processRunning: false,
+  });
+  assert.equal(await rootConfirmedGone.managed.stop(), "stopped");
 
   const transientDescendantInspection = createWindowsProcessHarness({
     closeOnTaskkill: true,

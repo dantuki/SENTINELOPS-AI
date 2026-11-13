@@ -26,6 +26,7 @@ export interface ManagedProcessRuntime {
   ): ManagedChild;
   taskkill(pid: number): { status: number | null; errorCode?: string };
   inspectWindowsDescendants(pid: number): number[] | null;
+  isWindowsProcessRunning(pid: number): boolean | null;
   killProcessGroup(pid: number, signal: NodeJS.Signals | 0): void;
   wait(milliseconds: number): Promise<void>;
 }
@@ -88,6 +89,33 @@ function inspectWindowsDescendants(pid: number): number[] | null {
   }
 }
 
+/**
+ * A narrow fallback for hosts where the CIM process-tree query is denied.
+ * It does not inspect arbitrary commands or descendants: it only confirms
+ * that the process started by this runner no longer exists after taskkill.
+ */
+function isWindowsProcessRunning(pid: number): boolean | null {
+  const result = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 1 }; exit 0`,
+    ],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+      windowsHide: true,
+      timeout: 5_000,
+    },
+  );
+  if (result.error) return null;
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  return null;
+}
+
 const defaultRuntime: ManagedProcessRuntime = {
   platform: process.platform,
   spawnChild(command, args, options) {
@@ -117,6 +145,7 @@ const defaultRuntime: ManagedProcessRuntime = {
     };
   },
   inspectWindowsDescendants,
+  isWindowsProcessRunning,
   killProcessGroup(pid, signal) {
     process.kill(pid, signal);
   },
@@ -190,6 +219,11 @@ export class ManagedProcess {
     return this.runtime.inspectWindowsDescendants(pid);
   }
 
+  private verifyWindowsStopped(pid: number): ProcessStopState {
+    const running = this.runtime.isWindowsProcessRunning(pid);
+    return running === false ? "stopped" : "unknown";
+  }
+
   private async stopProcess(): Promise<ProcessStopState> {
     const pid = this.child.pid;
     if (pid === undefined) {
@@ -207,7 +241,7 @@ export class ManagedProcess {
         }
         const descendants = await this.inspectWindowsDescendants(pid);
         return descendants === null
-          ? "unknown"
+          ? this.verifyWindowsStopped(pid)
           : descendants.length === 0
             ? "stopped"
             : "failed";
@@ -222,7 +256,9 @@ export class ManagedProcess {
       }
       const descendants = await this.inspectWindowsDescendants(pid);
       if (descendants === null) {
-        return "unknown";
+        return taskkill.status === 0
+          ? this.verifyWindowsStopped(pid)
+          : "unknown";
       }
       if (descendants.length > 0) {
         return taskkill.status === 0 ? "failed" : "unknown";

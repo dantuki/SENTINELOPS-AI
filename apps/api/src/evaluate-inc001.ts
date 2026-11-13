@@ -18,6 +18,10 @@ import {
   isVerifiedInvestigationResult,
   type VerifiedInvestigationResult,
 } from "./verified-investigation-result.js";
+import {
+  isDeterministicInvestigationResult,
+  type DeterministicInvestigationResult,
+} from "./deterministic-investigation.js";
 
 interface InvestigationData {
   model: string;
@@ -29,6 +33,7 @@ interface InvestigationData {
   retrievedAt: string;
   analysis: InvestigationAnalysis;
   verifiedInvestigationResult?: VerifiedInvestigationResult;
+  deterministicInvestigationResult?: DeterministicInvestigationResult;
 }
 
 interface EvaluationSession {
@@ -69,6 +74,13 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function parsePropertyReferences(value: unknown): string[] {
+  if (!isStringArray(value) || value.length === 0 || value.length > 32 || value.some((reference) => !reference.trim() || reference.length > 64)) {
+    throw new Error("Investigation property references have an invalid shape.");
+  }
+  return value.map((reference) => reference.trim());
+}
+
 function parseInvestigationAnalysis(value: unknown): InvestigationAnalysis {
   if (
     !isRecord(value) ||
@@ -97,14 +109,15 @@ function parseInvestigationAnalysis(value: unknown): InvestigationAnalysis {
   const observedFacts = value.observed_facts.map((fact) => {
     if (
       !isRecord(fact) ||
-      !(["claim,evidence_refs", "claim,event_id,evidence_refs"].includes(Object.keys(fact).sort().join(","))) ||
+      !(["claim,evidence_refs", "claim,event_id,evidence_refs", "claim,evidence_refs,property_refs", "claim,event_id,evidence_refs,property_refs"].includes(Object.keys(fact).sort().join(","))) ||
       typeof fact.claim !== "string" ||
       !isStringArray(fact.evidence_refs) ||
       (Object.hasOwn(fact, "event_id") && typeof fact.event_id !== "string")
     ) {
       throw new Error("Investigation fact has an invalid shape.");
     }
-    return { ...(typeof fact.event_id === "string" ? { event_id: fact.event_id } : {}), claim: fact.claim, evidence_refs: fact.evidence_refs };
+    const propertyRefs = Object.hasOwn(fact, "property_refs") ? parsePropertyReferences(fact.property_refs) : undefined;
+    return { ...(typeof fact.event_id === "string" ? { event_id: fact.event_id } : {}), ...(propertyRefs ? { property_refs: propertyRefs } : {}), claim: fact.claim, evidence_refs: fact.evidence_refs };
   });
   const allowedStatuses = new Set([
     "supported_unconfirmed",
@@ -207,6 +220,7 @@ function parseInvestigation(
   value: unknown,
   projectId: string,
   expectedRunId: string | undefined,
+  deterministic = false,
 ): InvestigationData {
   const data = isRecord(value) ? value.data : undefined;
   const dataKeys = isRecord(data) ? Object.keys(data).sort() : [];
@@ -220,13 +234,15 @@ function parseInvestigation(
     "retrievedAt",
     "runId",
   ];
-  const allowedDataKeys = [...requiredDataKeys, "verifiedFactInventory", "verifiedInvestigationResult"];
+  const allowedDataKeys = [...requiredDataKeys, "verifiedFactInventory", "verifiedInvestigationResult", "deterministicInvestigationResult"];
   if (
     !isRecord(data) ||
     !requiredDataKeys.every((key) => dataKeys.includes(key)) ||
     dataKeys.some((key) => !allowedDataKeys.includes(key)) ||
     (data.verifiedFactInventory !== undefined && !isRecord(data.verifiedFactInventory)) ||
     (data.verifiedInvestigationResult !== undefined && !isVerifiedInvestigationResult(data.verifiedInvestigationResult)) ||
+    (data.deterministicInvestigationResult !== undefined && !isDeterministicInvestigationResult(data.deterministicInvestigationResult)) ||
+    (deterministic && !isDeterministicInvestigationResult(data.deterministicInvestigationResult)) ||
     typeof data.model !== "string" ||
     typeof data.response !== "string" ||
     !isUuid(data.runId) ||
@@ -256,7 +272,7 @@ function parseInvestigation(
         item.incidentId !== "INC-001" ||
         item.retrievedAt !== data.retrievedAt,
     ) ||
-    renderInvestigationAnalysis(analysis) !== response
+    (!deterministic && renderInvestigationAnalysis(analysis) !== response)
   ) {
     throw new Error("Investigation response is not correlated with its manifest.");
   }
@@ -272,6 +288,9 @@ function parseInvestigation(
     analysis,
     ...(data.verifiedInvestigationResult
       ? { verifiedInvestigationResult: data.verifiedInvestigationResult }
+      : {}),
+    ...(data.deterministicInvestigationResult
+      ? { deterministicInvestigationResult: data.deterministicInvestigationResult }
       : {}),
   };
 }
@@ -397,9 +416,10 @@ async function withEvaluationSession(
 async function main(): Promise<void> {
   currentStage = "arguments";
   const argumentsList = process.argv.slice(2);
+  const deterministic = argumentsList.includes("--deterministic");
   const skipIngestion = argumentsList.includes("--skip-ingestion");
   const positionalArguments = argumentsList.filter(
-    (argument) => argument !== "--skip-ingestion",
+    (argument) => argument !== "--skip-ingestion" && argument !== "--deterministic",
   );
   const projectId = positionalArguments[0];
   const traceRunId = process.env.SENTINELOPS_TRACE_RUN_ID;
@@ -434,30 +454,24 @@ async function main(): Promise<void> {
     );
   }
 
-  const warmupStartedAt = performance.now();
-  currentStage = "warmup";
-  const aiAuthKey = process.env.AI_ORCHESTRATOR_API_KEY;
-  const warmupResponse = await fetch(new URL("/warmup", aiBase), {
-    method: "POST",
-    headers: aiAuthKey ? { authorization: `Bearer ${aiAuthKey}` } : {},
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!warmupResponse.ok) {
-    throw new Error(
-      `AI model warm-up failed with HTTP ${warmupResponse.status}.`,
-    );
-  }
-  const warmupDurationMs =
-    Math.round((performance.now() - warmupStartedAt) * 10) / 10;
-
-  currentStage = "readiness";
-  const readinessResponse = await fetch(new URL("/ready", aiBase), {
-    signal: AbortSignal.timeout(3_000),
-  });
-  if (!readinessResponse.ok) {
-    throw new Error(
-      `AI models are not ready after warm-up: HTTP ${readinessResponse.status}.`,
-    );
+  // Deterministic evaluation deliberately does not invoke /warmup or /ready:
+  // both endpoints require the chat model. Embedding availability is proven by
+  // the real ingestion and retrieval requests below.
+  let warmupDurationMs = 0;
+  if (!deterministic) {
+    const warmupStartedAt = performance.now();
+    currentStage = "warmup";
+    const aiAuthKey = process.env.AI_ORCHESTRATOR_API_KEY;
+    const warmupResponse = await fetch(new URL("/warmup", aiBase), {
+      method: "POST",
+      headers: aiAuthKey ? { authorization: `Bearer ${aiAuthKey}` } : {},
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!warmupResponse.ok) throw new Error(`AI model warm-up failed with HTTP ${warmupResponse.status}.`);
+    warmupDurationMs = Math.round((performance.now() - warmupStartedAt) * 10) / 10;
+    currentStage = "readiness";
+    const readinessResponse = await fetch(new URL("/ready", aiBase), { signal: AbortSignal.timeout(3_000) });
+    if (!readinessResponse.ok) throw new Error(`AI models are not ready after warm-up: HTTP ${readinessResponse.status}.`);
   }
 
   currentStage = "authentication";
@@ -470,6 +484,7 @@ async function main(): Promise<void> {
       traceRunId,
       skipIngestion,
       warmupDurationMs,
+      deterministic,
       (stage) => {
         currentStage = stage;
       },
@@ -484,6 +499,7 @@ async function runEvaluation(
   traceRunId: string | undefined,
   skipIngestion: boolean,
   warmupDurationMs: number,
+  deterministic: boolean,
   setStage: (stage: EvaluationStage) => void,
 ): Promise<void> {
   let ingestionDurationMs: number | null = null;
@@ -523,12 +539,14 @@ async function runEvaluation(
           "Describe la cronología de INC-001. En hechos, separa estos cinco puntos y no omitas valores: intentos y request ID; ambas mediciones del pool; endpoint, request ID, mensaje de error y código HTTP; métricas de la cola; nombre, estado y duración de payment-gateway. Distingue hechos, hipótesis y datos faltantes; no afirmes causalidad sin pruebas.",
         incidentId: "INC-001",
         limit: 5,
+        ...(deterministic ? { mode: "deterministic" } : {}),
       },
       session,
       traceRunId,
     ),
     projectId,
     traceRunId,
+    deterministic,
   );
   const investigationDurationMs =
     Math.round((performance.now() - investigationStartedAt) * 10) / 10;
@@ -556,7 +574,9 @@ async function runEvaluation(
   console.log(
     JSON.stringify(
       {
-        reportType: "inc001-candidate-v1",
+        reportType: deterministic
+          ? "inc001-deterministic-candidate-v1"
+          : "inc001-candidate-v1",
         dataset: groundTruth.dataset,
         incidentId: groundTruth.incident_id,
         model: investigation.model,
@@ -568,6 +588,9 @@ async function runEvaluation(
         response: investigation.response,
         analysis: investigation.analysis,
         verifiedInvestigationResult: investigation.verifiedInvestigationResult ?? null,
+        ...(deterministic
+          ? { deterministicInvestigationResult: investigation.deterministicInvestigationResult ?? null }
+          : {}),
         ingestion: skipIngestion ? "skipped" : "completed",
         timings: {
           warmupMs: warmupDurationMs,

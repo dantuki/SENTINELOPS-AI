@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import {
   analysisSchema,
   analysisSchemaForEvidenceAliases,
+  generationSchemaForEvidenceAliases,
   diagnoseInvestigationResponse,
   invalidGeneratedAnalysis,
   normalizeInvestigationCitationDuplicates,
@@ -43,6 +44,7 @@ import type {
 } from "../src/source-repository.js";
 import { registerSourceRoutes } from "../src/source-routes.js";
 import { createTestSecurity } from "./security-test-fixture.js";
+import type { VerifiedFactPromptRecord } from "../src/verified-fact-engine.js";
 
 const apps: FastifyInstance[] = [];
 const sharedInvestigationSchema: unknown = JSON.parse(
@@ -69,6 +71,46 @@ test("model schema restricts citations and runtime-record cardinality per reques
   assert.ok(encoded.includes('"enum":["R1","R2","R3"]'));
   assert.throws(() => analysisSchemaForEvidenceAliases([]));
   assert.throws(() => analysisSchemaForEvidenceAliases(["E1"], 0));
+});
+
+test("attested runtime binding requires references per emitted claim, not a model echo of every event", () => {
+  const records: VerifiedFactPromptRecord[] = [
+    {
+      eventAlias: "R1", eventId: "event-1", evidenceAlias: "E1", fields: { count: 0 },
+      properties: [{ propertyId: "P1_1", property: "count", value: 0, valueType: "number", unit: null }],
+      context: { event: "synthetic", timestamp: null, service: null, incidentRequestId: null },
+      sourceLocator: { line: 1, startOffset: 0, endOffset: 1, recordContentHash: "a".repeat(64) },
+    },
+    {
+      eventAlias: "R2", eventId: "event-2", evidenceAlias: "E1", fields: { count: 1 },
+      properties: [{ propertyId: "P2_1", property: "count", value: 1, valueType: "number", unit: null }],
+      context: { event: "synthetic", timestamp: null, service: null, incidentRequestId: null },
+      sourceLocator: { line: 2, startOffset: 2, endOffset: 3, recordContentHash: "b".repeat(64) },
+    },
+  ];
+  const constrained = analysisSchemaForEvidenceAliases(["E1"], undefined, ["R1", "R2"], records);
+  const observedFacts = (constrained.properties as Record<string, Record<string, unknown>>).observed_facts!;
+  assert.equal(observedFacts.minItems, undefined);
+  assert.equal(observedFacts.maxItems, 32);
+  const item = observedFacts.items as { required: string[]; properties: { event_id: { enum: string[] } } };
+  assert.deepEqual(item.required, ["event_id", "property_refs", "claim", "evidence_refs"]);
+  assert.deepEqual(item.properties.event_id.enum, ["R1", "R2"]);
+
+  const response = JSON.parse(structuredInvestigationResponse()) as Record<string, unknown>;
+  response.observed_facts = [{ event_id: "R1", property_refs: ["P1_1"], claim: "count=0", evidence_refs: ["E1"] }];
+  assert.deepEqual(diagnoseInvestigationResponse({ model: "test", response: JSON.stringify(response) }, 1, ["R1", "R2"], records), []);
+});
+
+test("Ollama generation schema keeps structure and aliases while server retains presentation bounds", () => {
+  const generation = generationSchemaForEvidenceAliases(["E1"], 1, ["R1"]);
+  const encoded = JSON.stringify(generation);
+  assert.equal(encoded.includes('"$id"'), false);
+  assert.equal(encoded.includes('"maxLength"'), false);
+  assert.equal(encoded.includes('"maxItems"'), false);
+  assert.ok(encoded.includes('"additionalProperties":false'));
+  assert.ok(encoded.includes('"enum":["E1"]'));
+  assert.ok(encoded.includes('"enum":["R1"]'));
+  assert.ok(JSON.stringify(analysisSchema).includes('"maxLength":2000'));
 });
 
 test("runtime event aliases reject a missing or duplicated generated record", () => {
@@ -2150,7 +2192,7 @@ test("POST /api/chat returns 502 for an invalid model response", async () => {
     assert.equal(chatCalls, 1);
     assert.deepEqual(response.json().data.analysis, analysis);
     assert.equal(response.json().data.response, renderInvestigationAnalysis(analysis));
-    assert.match(prompt, /unverified requiere supporting_evidence y contradicting_evidence vacíos/u);
+    assert.match(prompt, /Para unverified deja ambas listas de evidencia vacías/u);
   });
 
   test("investigation rejects an unverified hypothesis with references on the first response", async () => {
@@ -2273,7 +2315,7 @@ test("POST project investigate normalizes duplicate citations and logs only the 
   assert.deepEqual(analysis.observed_facts[0].evidence_refs, ["E1"]);
   assert.deepEqual(analysis.hypotheses[0].supporting_evidence, ["E1"]);
   assert.deepEqual(analysis.hypotheses[0].contradicting_evidence, ["E1"]);
-  assert.match(prompt, /alias únicos/u);
+  assert.match(prompt, /aliases válidos/u);
   const logs = logChunks.join("");
   assert.ok(logs.includes("citationNormalization"));
   assert.ok(logs.includes("$.response.summary_evidence_refs"));

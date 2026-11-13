@@ -59,6 +59,13 @@ import {
   RetrievalTraceVerifier,
   type TraceVerificationReport,
 } from "../src/retrieval-trace-verifier.js";
+import type { EvidenceManifestItem } from "../src/retrieval-trace.js";
+import { extractVerifiedFacts } from "../src/verified-fact-engine.js";
+import {
+  evaluateDeterministicProductGate,
+  isDeterministicInvestigationResult,
+  type DeterministicInvestigationResult,
+} from "../src/deterministic-investigation.js";
 
 const apiDirectory = fileURLToPath(new URL("../", import.meta.url));
 const repositoryRoot = resolve(apiDirectory, "..", "..");
@@ -76,6 +83,7 @@ const pythonExecutable = join(
 const reportsDirectory = join(repositoryRoot, "reports", "inc001-isolated");
 const EVALUATION_TIMEOUT_MS = 12 * 60_000;
 const PREFLIGHT_ONLY = process.argv.slice(2).includes("--preflight-only");
+const DETERMINISTIC = process.argv.slice(2).includes("--deterministic");
 
 interface Check {
   name: string;
@@ -105,6 +113,25 @@ interface CleanupReport {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseDeterministicCandidate(output: string, expectedRunId: string, expectedProjectId: string): {
+  runId: string; requestId: string; projectId: string; incidentId: string; retrievedAt: string;
+  manifest: EvidenceManifestItem[]; result: DeterministicInvestigationResult;
+} {
+  let value: unknown;
+  try { value = JSON.parse(output); } catch { throw new Error("Deterministic evaluator output is not valid JSON."); }
+  if (!isRecord(value) || value.reportType !== "inc001-deterministic-candidate-v1" ||
+    value.runId !== expectedRunId || typeof value.requestId !== "string" ||
+    value.projectId !== undefined || !Array.isArray(value.evidenceManifest) ||
+    !isDeterministicInvestigationResult(value.deterministicInvestigationResult)) {
+    throw new Error("Deterministic evaluator candidate is invalid.");
+  }
+  const result = value.deterministicInvestigationResult;
+  if (result.projectId !== expectedProjectId || result.runId !== expectedRunId || result.requestId !== value.requestId || result.incidentId !== "INC-001") {
+    throw new Error("Deterministic evaluator candidate has inconsistent identity.");
+  }
+  return { runId: expectedRunId, requestId: value.requestId, projectId: expectedProjectId, incidentId: "INC-001", retrievedAt: String(value.retrievedAt), manifest: value.evidenceManifest as EvidenceManifestItem[], result };
 }
 
 function appendError(existing: string | null, next: string): string {
@@ -1025,7 +1052,7 @@ async function main(): Promise<number> {
     evaluator = new ManagedProcess(
       "evaluator",
       process.execPath,
-      ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/evaluate-inc001.ts", seeded.projectId],
+      ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/evaluate-inc001.ts", seeded.projectId, ...(DETERMINISTIC ? ["--deterministic"] : [])],
       {
         cwd: apiDirectory,
         env: {
@@ -1071,6 +1098,46 @@ async function main(): Promise<number> {
     evaluatorExitCode = outcome.code;
     evaluationExitCode = outcome.code;
     if (outcome.code === 0) {
+      if (DETERMINISTIC) {
+        // API evidence uses the UUID propagated in x-sentinelops-run-id;
+        // runId is the runner/container identity and is deliberately distinct.
+        const candidate = parseDeterministicCandidate(evaluator.stdout.trim(), traceRunId, seeded.projectId);
+        const tracePool = makePool(database);
+        let traceVerification: TraceVerificationReport;
+        try {
+          await assertDatabaseIdentity(tracePool, database);
+          traceVerification = await new RetrievalTraceVerifier(tracePool).verifyTrace(candidate);
+        } finally {
+          await tracePool.end();
+        }
+        const inventory = extractVerifiedFacts({
+          manifest: candidate.manifest,
+          trace: traceVerification,
+          runId: candidate.runId,
+          requestId: candidate.requestId,
+          projectId: candidate.projectId,
+          incidentId: candidate.incidentId,
+        });
+        const recomputedGate = evaluateDeterministicProductGate({ inventory, result: candidate.result });
+        const accepted = traceVerification.status === "verified" &&
+          candidate.result.gateResult.status === recomputedGate.status &&
+          recomputedGate.status === "pass" && candidate.result.aiEnrichment.status === "not_requested";
+        finalizedEvaluationOutput = JSON.stringify({
+          reportType: "inc001-deterministic-verified-v1",
+          runId: candidate.runId,
+          requestId: candidate.requestId,
+          projectId: candidate.projectId,
+          incidentId: candidate.incidentId,
+          evidenceManifest: candidate.manifest,
+          deterministicInvestigationResult: candidate.result,
+          recomputedGate,
+          traceVerification,
+          legacyGateStatus: "not_applicable",
+          chatInvoked: false,
+          passed: accepted,
+        }, null, 2);
+        evaluationExitCode = accepted ? 0 : 1;
+      } else {
       const candidateOutput = evaluator.stdout.trim();
       const expectation = parseEvaluationTraceExpectation(
         candidateOutput,
@@ -1102,6 +1169,7 @@ async function main(): Promise<number> {
         throw new Error("The verified evaluation report is invalid.");
       }
       evaluationExitCode = verifiedSummary.passed === true ? 0 : 1;
+      }
     }
   } catch (error: unknown) {
     failureStage = currentPhase;
@@ -1129,7 +1197,23 @@ async function main(): Promise<number> {
 
   const evaluatorStdout =
     finalizedEvaluationOutput ?? evaluator?.stdout.trim() ?? "";
-  const summary = summarizeEvaluationOutput(evaluatorStdout, groundTruth);
+  const summary = DETERMINISTIC
+    ? (() => {
+        try {
+          const value: unknown = JSON.parse(evaluatorStdout);
+          const parsed = isRecord(value) && value.reportType === "inc001-deterministic-verified-v1" &&
+            typeof value.passed === "boolean" && value.legacyGateStatus === "not_applicable" &&
+            value.chatInvoked === false && isDeterministicInvestigationResult(value.deterministicInvestigationResult);
+          return {
+            parsed,
+            passed: parsed && isRecord(value) ? value.passed as boolean : null,
+            model: parsed ? "deterministic" : null,
+            timings: null,
+            validationErrors: parsed ? [] : ["invalid deterministic evaluation report"],
+          };
+        } catch { return { parsed: false, passed: null, model: null, timings: null, validationErrors: ["invalid deterministic evaluation report"] }; }
+      })()
+    : summarizeEvaluationOutput(evaluatorStdout, groundTruth);
   let result = resolveEvaluationResult(
     summary,
     evaluationExitCode,

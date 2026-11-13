@@ -9,6 +9,8 @@ import {
   composeVerifiedInvestigationResult,
   hasCompletePresentedFacts,
 } from "../src/verified-investigation-result.js";
+import { validateRuntimeObservedFacts } from "../src/investigation-routes.js";
+import type { InvestigationAnalysis } from "../src/investigation-analysis.js";
 import { hashChunkContent, type EvidenceManifestItem } from "../src/retrieval-trace.js";
 import type { TraceVerificationReport } from "../src/retrieval-trace-verifier.js";
 
@@ -176,8 +178,58 @@ test("Verified Fact Engine compact projection retains attested event identity an
   assert.equal(compact.records[0]?.fields.duration_ms, 180);
   assert.match(compact.records[0]?.eventId ?? "", new RegExp(`^${chunkId}:`));
   assert.equal(compact.records[0]?.sourceLocator.recordContentHash.length, 64);
+  assert.equal(compact.records[0]?.eventAlias, "R1");
+  assert.deepEqual(compact.records[0]?.properties, [
+    { propertyId: "P1_1", property: "idle_connections", value: 0, valueType: "number", unit: null },
+    { propertyId: "P1_2", property: "duration_ms", value: 180, valueType: "number", unit: "milliseconds" },
+  ]);
+  assert.equal(compact.records[0]?.context.event, "pool");
   assert.equal("content" in (compact.records[0] ?? {}), false);
   assert.equal("recordId" in (compact.records[0] ?? {}), false);
+});
+
+test("runtime semantic validation binds compact model claims to their own event, values, units, and evidence", () => {
+  const inventory = extract([
+    '{"incident_id":"INC-OTHER","event":"pool","idle_connections":0,"duration_ms":180,"status_code":200}',
+    '{"incident_id":"INC-OTHER","event":"request","request_id":"other-17","status_code":500,"duration_ms":5000}',
+  ].join("\n"));
+  const projection = projectVerifiedFactsForPrompt(inventory);
+  const claimFor = (record: typeof projection.records[number]) => record.properties.map((property) => {
+    const unit = property.unit === "milliseconds" ? " ms" : property.unit ? ` ${property.unit}` : "";
+    return `${property.property}=${String(property.value)}${unit}`;
+  }).join("; ");
+  const analysis: InvestigationAnalysis = {
+    summary: "Se registraron dos eventos independientes.", summary_evidence_refs: ["E1"],
+    observed_facts: projection.records.map((record) => ({
+      event_id: record.eventAlias,
+      property_refs: record.properties.map(({ propertyId }) => propertyId),
+      claim: claimFor(record), evidence_refs: [record.evidenceAlias],
+    })),
+    hypotheses: [], missing_information: [], next_checks: [], limitations: [],
+  };
+  assert.deepEqual(validateRuntimeObservedFacts(analysis, projection.records), []);
+
+  const altered = structuredClone(analysis);
+  altered.observed_facts[0]!.claim = altered.observed_facts[0]!.claim.replace("idle_connections=0", "idle_connections=1"); // zero preservation
+  altered.observed_facts[0]!.claim = altered.observed_facts[0]!.claim.replace("duration_ms=180 ms", "duration_ms=180"); // unit omission
+  altered.observed_facts[1]!.property_refs!.push(altered.observed_facts[0]!.property_refs![0]!); // foreign event ID
+  altered.observed_facts[1]!.evidence_refs = ["E9"]; // irrelevant citation
+  altered.observed_facts[1]!.claim = "Este evento causó el incidente."; // causal language as fact
+  const codes = validateRuntimeObservedFacts(altered, projection.records).map(({ code }) => code);
+  assert.ok(codes.includes("property_not_expressed"));
+  assert.ok(codes.includes("property_unit_not_expressed"));
+  assert.ok(codes.includes("property_not_in_event"));
+  assert.ok(codes.includes("irrelevant_citation"));
+  assert.ok(codes.includes("causal_language_in_observed_fact"));
+
+  const compact = structuredClone(analysis);
+  compact.observed_facts[0]!.property_refs = [compact.observed_facts[0]!.property_refs![0]!];
+  compact.observed_facts[0]!.claim = "idle_connections=0";
+  assert.deepEqual(validateRuntimeObservedFacts(compact, projection.records), []);
+
+  const duplicate = structuredClone(analysis);
+  duplicate.observed_facts[0]!.property_refs!.push(duplicate.observed_facts[0]!.property_refs![0]!);
+  assert.ok(validateRuntimeObservedFacts(duplicate, projection.records).some(({ code }) => code === "duplicate_property_reference"));
 });
 
 test("public verified result preserves zeroes and refuses altered project facts", () => {

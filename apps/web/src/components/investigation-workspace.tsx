@@ -87,6 +87,20 @@ interface InvestigationResult {
   evidence: Evidence[];
   analysis: InvestigationAnalysis;
   verifiedInvestigationResult?: VerifiedInvestigationResult;
+  deterministicInvestigationResult?: DeterministicInvestigationResult;
+}
+
+interface DeterministicInvestigationResult {
+  schemaVersion: "investigation-result-v2";
+  mode: "deterministic" | "hybrid" | "ai";
+  status: "complete" | "partial" | "insufficient_evidence";
+  verifiedObservations: Array<{ evidenceAlias: string; eventId: string; property: string; value: string | number | boolean | null; unit: string | null }>;
+  detectedPatterns: Array<{ ruleId: string; description: string; evidenceRefs: string[] }>;
+  hypotheses: Array<{ statement: string; status: "insufficient_evidence"; missingEvidence: string[] }>;
+  limitations: string[];
+  recommendedChecks: string[];
+  aiEnrichment: { status: "not_requested" | "unavailable" | "invalid" | "validated"; model: string | null; failure: string | null };
+  gateResult: { gate: "evidence-first-deterministic-product-gate-v2"; status: "pass" | "fail"; reasons: string[] };
 }
 
 interface VerifiedInvestigationResult {
@@ -295,6 +309,18 @@ function isVerifiedInvestigationResult(value: unknown): value is VerifiedInvesti
     typeof value.aiAnalysis.failure === "string";
 }
 
+function isDeterministicInvestigationResult(value: unknown): value is DeterministicInvestigationResult {
+  return isRecord(value) && value.schemaVersion === "investigation-result-v2" &&
+    ["deterministic", "hybrid", "ai"].includes(String(value.mode)) &&
+    ["complete", "partial", "insufficient_evidence"].includes(String(value.status)) &&
+    Array.isArray(value.verifiedObservations) && Array.isArray(value.detectedPatterns) &&
+    Array.isArray(value.hypotheses) && Array.isArray(value.limitations) &&
+    Array.isArray(value.recommendedChecks) && isRecord(value.aiEnrichment) &&
+    ["not_requested", "unavailable", "invalid", "validated"].includes(String(value.aiEnrichment.status)) &&
+    isRecord(value.gateResult) && value.gateResult.gate === "evidence-first-deterministic-product-gate-v2" &&
+    ["pass", "fail"].includes(String(value.gateResult.status));
+}
+
 function isInvestigationResult(
   value: unknown,
 ): value is InvestigationResult {
@@ -305,7 +331,8 @@ function isInvestigationResult(
     Array.isArray(value.evidence) &&
     value.evidence.every(isEvidence) &&
     isInvestigationAnalysis(value.analysis, value.evidence.length) &&
-    (value.verifiedInvestigationResult === undefined || isVerifiedInvestigationResult(value.verifiedInvestigationResult))
+    (value.verifiedInvestigationResult === undefined || isVerifiedInvestigationResult(value.verifiedInvestigationResult)) &&
+    (value.deterministicInvestigationResult === undefined || isDeterministicInvestigationResult(value.deterministicInvestigationResult))
   );
 }
 
@@ -552,6 +579,7 @@ export function InvestigationWorkspace() {
   const [selectionError, setSelectionError] = useState("");
   const [selectionRetry, setSelectionRetry] = useState(0);
   const [question, setQuestion] = useState("");
+  const [investigationMode, setInvestigationMode] = useState<"deterministic" | "hybrid" | "ai">("hybrid");
   const [lastQuestion, setLastQuestion] = useState("");
   const [result, setResult] = useState<InvestigationResult | null>(null);
   const [investigationError, setInvestigationError] = useState("");
@@ -755,6 +783,7 @@ export function InvestigationWorkspace() {
             incidentId:
               selectedIncident.externalReference?.trim() ||
               selectedIncident.id,
+            mode: investigationMode,
           }),
         },
       );
@@ -1216,6 +1245,19 @@ export function InvestigationWorkspace() {
                         rows={4}
                         disabled={isSubmitting}
                       />
+                      <label htmlFor="investigation-mode">
+                        Modo de investigación
+                      </label>
+                      <select
+                        id="investigation-mode"
+                        value={investigationMode}
+                        onChange={(event) => setInvestigationMode(event.target.value as "deterministic" | "hybrid" | "ai")}
+                        disabled={isSubmitting}
+                      >
+                        <option value="hybrid">Híbrido: evidencia primero, enriquecimiento IA opcional</option>
+                        <option value="deterministic">Determinista: sin generación de chat</option>
+                        <option value="ai">Solo IA: requiere análisis generativo válido</option>
+                      </select>
                       <div className="composer-footer">
                         <span>
                           La respuesta se limitará a las evidencias
@@ -1335,6 +1377,23 @@ export function InvestigationWorkspace() {
                             </li>
                           ))}
                         </ul>
+                      </section>
+                    ) : null}
+
+                    {result.deterministicInvestigationResult ? (
+                      <section className="response-section" aria-labelledby="deterministic-result-title">
+                        <h4 id="deterministic-result-title">Investigación determinista</h4>
+                        <p>
+                          Modo: {result.deterministicInvestigationResult.mode}. Enriquecimiento IA: {result.deterministicInvestigationResult.aiEnrichment.status}. Gate de producto V2: {result.deterministicInvestigationResult.gateResult.status}.
+                        </p>
+                        <h5>VERIFIED OBSERVATION</h5>
+                        <ul>{result.deterministicInvestigationResult.verifiedObservations.map((observation) => <li key={`${observation.eventId}:${observation.property}`}><code>{observation.property}</code>: {String(observation.value)}{observation.unit ? ` ${observation.unit}` : ""} [{observation.evidenceAlias}]</li>)}</ul>
+                        <h5>DETECTED PATTERN</h5>
+                        <ul>{result.deterministicInvestigationResult.detectedPatterns.length > 0 ? result.deterministicInvestigationResult.detectedPatterns.map((pattern) => <li key={pattern.ruleId}>{pattern.description}</li>) : <li>No se detectó un patrón con evidencia suficiente.</li>}</ul>
+                        <h5>UNCONFIRMED HYPOTHESIS</h5>
+                        <ul>{result.deterministicInvestigationResult.hypotheses.map((hypothesis) => <li key={hypothesis.statement}>{hypothesis.statement}</li>)}</ul>
+                        <h5>Comprobaciones recomendadas</h5>
+                        <ul>{result.deterministicInvestigationResult.recommendedChecks.map((check) => <li key={check}>{check}</li>)}</ul>
                       </section>
                     ) : null}
 

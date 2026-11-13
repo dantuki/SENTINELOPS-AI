@@ -12,10 +12,11 @@
     "test:project-isolation": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs --test tests/project-isolation.integration.test.ts",
     "test:postgres": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/run-postgres-integration.ts",
     "evaluate:inc001:isolated": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/run-inc001-evaluation.ts",
+    "evaluate:inc001:deterministic": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/run-inc001-evaluation.ts --deterministic",
     "benchmark:model-capability": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/model-capability-benchmark.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
-    "test": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs --test tests/app.test.ts tests/ingestion.test.ts tests/inc001-evaluation.test.ts tests/auth-security.test.ts tests/inc001-isolated-runner.test.ts tests/verified-fact-engine.test.ts",
+    "test": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs --test tests/app.test.ts tests/ingestion.test.ts tests/inc001-evaluation.test.ts tests/auth-security.test.ts tests/inc001-isolated-runner.test.ts tests/verified-fact-engine.test.ts tests/deterministic-investigation.test.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "typecheck:runner": "tsc --ignoreConfig --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck scripts/run-inc001-evaluation.ts scripts/inc001-runner-lifecycle.ts tests/inc001-isolated-runner.test.ts"
   },
