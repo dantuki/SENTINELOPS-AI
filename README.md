@@ -1,5 +1,7 @@
 # SentinelOps AI
 
+> Actualización de producto: el repositorio incorpora un MVP de **QA Evidence-First** para importar repositorios públicos de GitHub y ejecutar comprobaciones estáticas sin ejecutar código no confiable. El flujo de investigación de incidentes, su procedencia y sus gates permanecen independientes. Consulta [QA-MVP.md](./docs/QA-MVP.md) para alcance, seguridad, límites y validación.
+
 ## Procedencia de evidencias (implementada, validación de infraestructura pendiente)
 
 Las investigaciones persisten una traza de recuperación antes de enviar los fragmentos al servicio de IA. La traza vincula el UUID de correlación del runner, el UUID de solicitud de la API, el proyecto, el incidente solicitado, el rango, la relación canónica entre fragmento/documento/fuente, la puntuación de recuperación, el SHA-256 del contenido exacto del fragmento en UTF-8 y su ámbito (`incident_specific`, `project_context`, `other_incident` o `unknown_scope`). `E<n>` es solo un alias por solicitud; la identidad canónica de la evidencia sigue siendo el UUID del fragmento.

@@ -10,7 +10,7 @@ export const metadata: Metadata = {
     template: "%s | SentinelOps AI",
   },
   description:
-    "Plataforma de investigación de incidentes de software basada en evidencias, RAG y herramientas MCP.",
+    "Asistente de calidad de software basado en evidencia verificable, con investigación avanzada disponible para incidentes.",
 };
 
 export default function RootLayout({

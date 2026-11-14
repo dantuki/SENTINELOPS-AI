@@ -118,6 +118,10 @@ const policies = new Map<string, RoutePolicy>([
     "POST /api/projects/:projectId/investigate",
     { permission: "project.investigate" },
   ],
+  [
+    "POST /api/projects/:projectId/qa/github",
+    { permission: "project.manage" },
+  ],
   ["POST /api/chat", { permission: "chat.use" }],
   ["POST /api/admin/users", { permission: "instance.admin" }],
   [

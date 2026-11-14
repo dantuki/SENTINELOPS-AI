@@ -4,54 +4,54 @@ import { ProductApiStatus } from "@/components/product-api-status";
 const workflowSteps = [
   {
     number: "01",
-    title: "Triage del incidente",
+    title: "Conecta un repositorio público",
     description:
-      "Identificar síntomas, alcance, servicio afectado y contexto faltante.",
+      "Autoriza un proyecto y proporciona una URL canónica de GitHub.",
   },
   {
     number: "02",
-    title: "Recuperación de evidencia",
+    title: "Inventario acotado y seguro",
     description:
-      "Localizar documentación, código y registros dentro del proyecto autorizado.",
+      "Se consultan sólo archivos de texto mediante la API pública de GitHub, con límites verificables.",
   },
   {
     number: "03",
-    title: "Investigación mediante MCP",
+    title: "Análisis estático con evidencia",
     description:
-      "Consultar herramientas con parámetros validados y permisos limitados.",
+      "Cada hallazgo conserva archivo, línea, extracto reducido e identidad de contenido.",
   },
   {
     number: "04",
-    title: "Verificación de hipótesis",
+    title: "Conversación sobre el informe",
     description:
-      "Contrastar hechos, evidencias contrarias e información insuficiente.",
+      "Pregunta por hallazgos, ubicaciones, recomendaciones y límites sin inventar conclusiones.",
   },
   {
     number: "05",
-    title: "Informe estructurado",
+    title: "Siguiente comprobación explícita",
     description:
-      "Presentar conclusiones justificadas, incertidumbres y pruebas recomendadas.",
+      "El informe separa lo inspeccionado de las pruebas que no se ejecutaron.",
   },
 ];
 
 const principles = [
   {
     number: "PRINCIPIO 01",
-    title: "Evidencias verificables",
+    title: "Hallazgos verificables",
     description:
-      "Las afirmaciones técnicas deberán enlazarse con fuentes reales y ubicaciones comprobables.",
+      "Cada hallazgo incluye la ubicación y el hash del contenido que fue inspeccionado.",
   },
   {
     number: "PRINCIPIO 02",
-    title: "Herramientas con límites",
+    title: "Importación con límites",
     description:
-      "Las consultas se ejecutarán mediante herramientas autorizadas. La primera versión será de solo lectura.",
+      "El MVP limita tamaño, número y tipo de archivo; no sigue URLs arbitrarias ni ejecuta código.",
   },
   {
     number: "PRINCIPIO 03",
-    title: "Incertidumbre explícita",
+    title: "Sin falsas garantías",
     description:
-      "Una hipótesis no se presentará como causa raíz confirmada cuando las evidencias no sean suficientes.",
+      "Un informe estático no equivale a pruebas ejecutadas, una auditoría completa ni una causa raíz confirmada.",
   },
 ];
 
@@ -69,16 +69,16 @@ const architecture = [
       "Fastify para administrar las operaciones del producto y validar solicitudes.",
   },
   {
-    type: "Inteligencia",
-    name: "AI orchestrator",
+    type: "QA engine",
+    name: "Static evidence engine",
     description:
-      "Python, FastAPI y LangGraph para coordinar investigaciones con estado explícito.",
+      "Reglas deterministas y trazables sobre una copia acotada de archivos de texto públicos.",
   },
   {
-    type: "Herramientas",
-    name: "MCP server",
+    type: "Investigación avanzada",
+    name: "Incident evidence engine",
     description:
-      "Servicio independiente para exponer herramientas de investigación autorizadas.",
+      "El flujo previo de incidentes se mantiene separado para preservar procedencia y hechos verificados.",
   },
 ];
 
@@ -98,13 +98,13 @@ export default function Home() {
 
             <span className="brand-text">
               SENTINELOPS
-              <span>AI INCIDENT INTELLIGENCE</span>
+              <span>QUALITY ASSISTANT</span>
             </span>
           </a>
 
           <nav className="nav-links" aria-label="Navegación principal">
-            <a href="/knowledge-base">Knowledge Base</a>
-            <a href="/investigation">Investigation Workspace</a>
+            <a href="/qa">QA Workspace</a>
+            <a href="/investigation">Investigation avanzada</a>
             <a href="/login">Iniciar sesión</a>
             <a href="#principios">Principios</a>
             <a href="#flujo">Flujo de trabajo</a>
@@ -120,27 +120,26 @@ export default function Home() {
           <div className="hero-copy">
             <p className="eyebrow">
               <span className="status-dot" aria-hidden="true" />
-              SOFTWARE INCIDENT INTELLIGENCE
+              SOFTWARE QUALITY · EVIDENCE FIRST
             </p>
 
             <h1 id="hero-title" className="hero-title">
-              No adivines la causa raíz.
-              <span> Encuentra la evidencia.</span>
+              Entiende la calidad del proyecto.
+              <span> Conserva la evidencia.</span>
             </h1>
 
             <p className="hero-description">
-              SentinelOps AI está diseñado para ayudar a los equipos de
-              desarrollo a investigar fallos mediante recuperación documental,
-              herramientas autorizadas y resultados que distinguen hechos,
-              hipótesis e incertidumbres.
+              SentinelOps AI permite importar un repositorio público de GitHub
+              en un proyecto autorizado, revisarlo estáticamente y conversar
+              sobre hallazgos que conservan ubicación, hash y límites claros.
             </p>
 
             <div className="hero-actions">
               <a
                 className="action-link action-primary"
-                href="/investigation"
+                href="/qa"
               >
-                Abrir Investigation Workspace
+                Abrir QA Workspace
                 <span aria-hidden="true">↗</span>
               </a>
 
@@ -150,24 +149,24 @@ export default function Home() {
             </div>
 
             <p className="hero-note">
-              Datos de demostración y fuentes autorizadas como alcance inicial.
-              Sin cambios automáticos en sistemas de producción.
+              MVP de solo lectura: sin ejecutar scripts, instalaciones, pruebas
+              ni cambios automáticos en el repositorio.
             </p>
           </div>
 
           <aside
             className="workflow-card"
-            aria-label="Flujo conceptual de investigación"
+              aria-label="Flujo de análisis de QA"
           >
             <div className="card-topline">
               <div>
-                <p className="card-caption">Investigation workflow</p>
+                <p className="card-caption">QA workflow</p>
                 <h2 className="card-title">
-                  De un síntoma a la evidencia
+                  Del repositorio a la evidencia
                 </h2>
               </div>
 
-              <span className="design-label">DISEÑO CONCEPTUAL</span>
+              <span className="design-label">MVP IMPLEMENTADO</span>
             </div>
 
             <div className="workflow-list">
@@ -184,8 +183,8 @@ export default function Home() {
             </div>
 
             <div className="card-footnote">
-              Este flujo describe el diseño previsto. No representa una
-              investigación ejecutándose en tiempo real.
+              El análisis estático está implementado. Las cargas ZIP y la
+              ejecución aislada de pruebas siguen fuera del alcance del MVP.
             </div>
           </aside>
         </section>
@@ -200,14 +199,13 @@ export default function Home() {
               <p className="section-kicker">Principios del producto</p>
 
               <h2 id="principles-title" className="section-title">
-                Un diagnóstico útil también sabe reconocer sus límites.
+                Una revisión útil muestra tanto el hallazgo como su límite.
               </h2>
             </div>
 
             <p className="section-description">
-              El objetivo no es generar una respuesta convincente a toda costa.
-              Es producir una investigación trazable que pueda revisarse y
-              ponerse a prueba.
+              El objetivo no es puntuar o prometer calidad total. Es producir
+              evidencia revisable para orientar la siguiente comprobación.
             </p>
           </div>
 
@@ -229,16 +227,16 @@ export default function Home() {
         >
           <div className="section-heading">
             <div>
-              <p className="section-kicker">Investigación controlada</p>
+              <p className="section-kicker">Análisis controlado</p>
 
               <h2 id="workflow-title" className="section-title">
-                Cada etapa debe dejar evidencia de lo que hizo.
+                Cada etapa deja un límite y una evidencia explícitos.
               </h2>
             </div>
 
             <p className="section-description">
-              El workflow se implementará con estados explícitos, límites de
-              ejecución y condiciones de parada verificables.
+              Las reglas, el inventario inspeccionado y las exclusiones se
+              devuelven junto con el informe para que la revisión sea auditable.
             </p>
           </div>
 
@@ -263,16 +261,16 @@ export default function Home() {
         >
           <div className="section-heading">
             <div>
-              <p className="section-kicker">Arquitectura prevista</p>
+              <p className="section-kicker">Arquitectura del MVP</p>
 
               <h2 id="architecture-title" className="section-title">
-                Servicios separados. Responsabilidades claras.
+                Un asistente de QA sin perder la evidencia.
               </h2>
             </div>
 
             <p className="section-description">
-              El frontend, la API de producto, el motor de IA y el servidor MCP
-              mantendrán límites definidos y contratos explícitos.
+              El frontend, el proxy autenticado, la API de producto y el motor
+              estático mantienen límites definidos y contratos explícitos.
             </p>
           </div>
 
@@ -290,14 +288,14 @@ export default function Home() {
           </div>
 
           <p className="disclaimer">
-            Estado: interfaz inicial en construcción. Las descripciones
-            anteriores explican el diseño del producto; no indican que todos
-            los servicios estén integrados o desplegados.
+            Estado: importación GitHub pública y análisis estático implementados
+            en el repositorio. No se afirma ejecución de pruebas, análisis ZIP,
+            despliegue público ni una auditoría de seguridad completa.
           </p>
         </section>
 
         <footer className="site-footer">
-          <span>SentinelOps AI · Software Incident Intelligence</span>
+          <span>SentinelOps AI · Software Quality</span>
 
           <span className="footer-note">
             Evidencia antes que suposiciones.

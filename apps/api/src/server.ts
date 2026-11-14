@@ -13,6 +13,7 @@ import { registerInvestigationRoutes } from "./investigation-routes.js";
 import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
+import { registerQaRoutes } from "./qa-routes.js";
 import { registerSourceRoutes } from "./source-routes.js";
 import { ProjectSourceRepository } from "./source-repository.js";
 import { PostgresRetrievalTraceStore } from "./retrieval-trace.js";
@@ -94,6 +95,7 @@ async function main(): Promise<void> {
     : undefined;
 
   registerProductRoutes(app, productRepository);
+  registerQaRoutes(app, { sourceStore: sourceRepository });
   registerSourceRoutes(app, sourceRepository);
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);
