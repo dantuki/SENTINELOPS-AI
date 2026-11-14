@@ -3,7 +3,12 @@ import test from "node:test";
 
 import { deterministicPatternKey } from "../src/lib/deterministic-pattern.ts";
 import {
+  createDirectedInvestigationView,
+  recognizeDirectedQuery,
+} from "../src/lib/directed-investigation.ts";
+import {
   createInvestigationPresentation,
+  labelForProperty,
   type DeterministicInvestigationPresentationInput,
   type InvestigationObservation,
   type InvestigationPattern,
@@ -19,11 +24,13 @@ function fact(input: {
   unit?: string | null;
   timestamp: string;
   service?: string;
+  evidenceId?: string;
+  evidenceAlias?: string;
 }): InvestigationObservation {
   return {
     factId: input.factId,
-    evidenceId: "evidence-1",
-    evidenceAlias: "E1",
+    evidenceId: input.evidenceId ?? "evidence-1",
+    evidenceAlias: input.evidenceAlias ?? "E1",
     eventId: input.eventId,
     projectId: "project-1",
     incidentId: "INC-TEST",
@@ -89,10 +96,11 @@ function presentationFor(
     title: "Incidente de prueba",
     serviceName: "orders-api",
   },
+  evidence = [{ evidenceId: "evidence-1", alias: "E1" }],
 ) {
   return createInvestigationPresentation({
     incident,
-    evidence: [{ evidenceId: "evidence-1", alias: "E1" }],
+    evidence,
     result,
   });
 }
@@ -193,6 +201,161 @@ test("the presentation preserves attested indicators, zeroes, units, timestamps,
   assert.match(presentation.summary.text, /causa raíz permanece sin confirmar/iu);
 });
 
+test("the contextual summary links only attested facts and retrieved evidence without asserting causality", () => {
+  const observations = [
+    fact({ factId: "active", eventId: "capacity-event", property: "active_connections", value: 20, timestamp: "2026-01-01T14:03:12.000Z" }),
+    fact({ factId: "maximum", eventId: "capacity-event", property: "max_connections", value: 20, timestamp: "2026-01-01T14:03:12.000Z" }),
+    fact({ factId: "idle", eventId: "capacity-event", property: "idle_connections", value: 0, timestamp: "2026-01-01T14:03:12.000Z" }),
+  ];
+  const presentation = presentationFor(deterministicResult({
+    observations,
+    patterns: [
+      {
+        ruleId: "capacity-at-limit",
+        description: "La capacidad activa observada alcanza o supera el límite en un mismo evento.",
+        matchedFactIds: ["active", "maximum"],
+        evidenceRefs: ["evidence-1"],
+      },
+      {
+        ruleId: "no-idle-capacity",
+        description: "No se observó capacidad inactiva en este evento.",
+        matchedFactIds: ["idle"],
+        evidenceRefs: ["evidence-1"],
+      },
+    ],
+  }));
+
+  const capacity = presentation.contextualSummary.statements.find(
+    (statement) => statement.key === "summary:capacity-at-limit",
+  );
+
+  assert.deepEqual(capacity?.factIds, ["active", "maximum"]);
+  assert.deepEqual(capacity?.evidence.map((reference) => reference.evidenceId), ["evidence-1"]);
+  assert.equal(presentation.contextualSummary.supportingFacts.length, 3);
+  assert.match(presentation.contextualSummary.uncertainty, /no determinada/iu);
+  assert.doesNotMatch(
+    presentation.contextualSummary.statements.map((statement) => statement.text).join(" "),
+    /causó|causa raíz confirmada/iu,
+  );
+});
+
+test("the presentation limits highlighted indicators while preserving every numeric measurement and exact labels", () => {
+  const observations = Array.from({ length: 83 }, (_value, index) =>
+    fact({
+      factId: `fact-${index}`,
+      eventId: `event-${index}`,
+      property: index === 0 ? "active_connections" : `technical_metric_${index}`,
+      value: index === 0 ? 0 : index,
+      unit: index === 2 ? "requests/minute" : null,
+      timestamp: `2026-01-01T14:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    }),
+  );
+  const patterns: InvestigationPattern[] = Array.from({ length: 12 }, (_value, index) => ({
+    ruleId: index % 2 === 0 ? "capacity-at-limit" : "operational-waiting",
+    description: "Patrón atestado para comprobar preservación de instancias.",
+    matchedFactIds: [`fact-${index}`],
+    evidenceRefs: ["evidence-1"],
+  }));
+  const presentation = presentationFor(deterministicResult({ observations, patterns }));
+
+  assert.equal(presentation.eventFacts.flatMap((event) => event.observations).length, 83);
+  assert.equal(
+    presentation.patternGroups.reduce((total, group) => total + group.instances.length, 0),
+    12,
+  );
+  assert.equal(presentation.indicators.length, 83);
+  assert.equal(presentation.highlightedIndicators.length, 5);
+  assert.equal(presentation.highlightedIndicators[0]?.value, 0);
+  assert.equal(labelForProperty("active_connections"), "Conexiones activas");
+  assert.equal(labelForProperty("technical_metric_12"), "technical_metric_12");
+  assert.equal(presentation.indicators[2]?.unit, "requests/minute");
+  assert.equal(presentation.indicators[2]?.context.timestamp, "2026-01-01T14:02:00.000Z");
+});
+
+test("directed investigation recognition is closed, accent-tolerant, and conservative for ambiguous questions", () => {
+  assert.deepEqual(recognizeDirectedQuery("¿Cuál es la cronología?"), {
+    intent: "timeline",
+    matchedIntents: ["timeline"],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Qué errores HTTP 5xx hubo?"), {
+    intent: "errors",
+    matchedIntents: ["errors"],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Hubo saturación del pool?"), {
+    intent: "capacity",
+    matchedIntents: ["capacity"],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Se observaron reintentos?"), {
+    intent: "retries",
+    matchedIntents: ["retries"],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Qué evidencias y fuentes hay?"), {
+    intent: "evidence",
+    matchedIntents: ["evidence"],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Cuál fue la causa raíz?"), {
+    intent: "unknown",
+    matchedIntents: [],
+  });
+  assert.deepEqual(recognizeDirectedQuery("¿Errores y reintentos?"), {
+    intent: "unknown",
+    matchedIntents: ["errors", "retries"],
+  });
+});
+
+test("directed investigation views navigate only facts, events, and evidence already attested", () => {
+  const observations = [
+    fact({ factId: "status", eventId: "error-event", property: "status_code", value: 503, timestamp: "2026-01-01T14:03:12.000Z" }),
+    fact({ factId: "capacity", eventId: "capacity-event", property: "active_connections", value: 20, timestamp: "2026-01-01T14:03:15.000Z" }),
+    fact({ factId: "retries", eventId: "retry-event", property: "retries_last_minute", value: 8, timestamp: "2026-01-01T14:03:18.000Z", evidenceId: "evidence-2", evidenceAlias: "E2" }),
+  ];
+  const presentation = presentationFor(deterministicResult({
+    observations,
+    patterns: [
+      { ruleId: "http-5xx-observed", description: "Se observó HTTP 5xx.", matchedFactIds: ["status"], evidenceRefs: ["evidence-1"] },
+      { ruleId: "capacity-at-limit", description: "Se observó capacidad al límite.", matchedFactIds: ["capacity"], evidenceRefs: ["evidence-1"] },
+      { ruleId: "retries-observed", description: "Se observaron reintentos.", matchedFactIds: ["retries"], evidenceRefs: ["evidence-2"] },
+    ],
+  }), undefined, [
+    { evidenceId: "evidence-1", alias: "E1" },
+    { evidenceId: "evidence-2", alias: "E2" },
+  ]);
+
+  const errors = createDirectedInvestigationView(presentation, "¿Qué errores hubo?");
+  const capacity = createDirectedInvestigationView(presentation, "¿Hubo saturación del pool?");
+  const retries = createDirectedInvestigationView(presentation, "¿Se observaron reintentos?");
+  const timeline = createDirectedInvestigationView(presentation, "Ver cronología");
+  const ambiguous = createDirectedInvestigationView(presentation, "Errores y reintentos");
+  const unknown = createDirectedInvestigationView(presentation, "¿Cuál fue la causa raíz?");
+
+  assert.equal(errors.status, "resolved");
+  assert.deepEqual(errors.facts.map((item) => item.factId), ["status"]);
+  assert.deepEqual(errors.events.map((item) => item.eventId), ["error-event"]);
+  assert.deepEqual(errors.evidence.map((item) => item.evidenceId), ["evidence-1"]);
+  assert.deepEqual(capacity.facts.map((item) => item.factId), ["capacity"]);
+  assert.deepEqual(retries.facts.map((item) => item.factId), ["retries"]);
+  assert.deepEqual(retries.evidence.map((item) => item.alias), ["E2"]);
+  assert.equal(timeline.status, "resolved");
+  assert.deepEqual(timeline.events.map((item) => item.eventId), ["error-event", "capacity-event", "retry-event"]);
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.equal(unknown.status, "unknown");
+  assert.match(errors.message, /no una conclusión nueva/iu);
+});
+
+test("a recognized query without matching facts is explicitly unavailable rather than answered", () => {
+  const presentation = presentationFor(deterministicResult({
+    observations: [
+      fact({ factId: "other", eventId: "event-1", property: "queue_depth", value: 1, timestamp: "2026-01-01T14:03:12.000Z" }),
+    ],
+  }));
+
+  const view = createDirectedInvestigationView(presentation, "¿Cuál fue la saturación de capacidad?");
+
+  assert.equal(view.status, "unavailable");
+  assert.equal(view.facts.length, 0);
+  assert.match(view.message, /no contiene hechos atestados suficientes/iu);
+});
+
 test("the presentation does not invent indicators or a causal summary when evidence is insufficient", () => {
   const presentation = presentationFor(
     deterministicResult({ observations: [] }),
@@ -263,6 +426,10 @@ test("the presentation remains incident-agnostic and has no network side effects
     assert.equal(presentation.incident.title, "Disponibilidad de caché");
     assert.equal(presentation.eventFacts[0]?.context.service, "cache-api");
     assert.doesNotMatch(presentation.summary.text, /pedidos|postgresql/iu);
+    assert.equal(
+      createDirectedInvestigationView(presentation, "¿Qué evidencias hay?").status,
+      "resolved",
+    );
     assert.equal(calls, 0);
   } finally {
     Object.defineProperty(globalThis, "fetch", {

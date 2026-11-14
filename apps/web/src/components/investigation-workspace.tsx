@@ -2,6 +2,7 @@
 
 import { ProductApiStatus } from "@/components/product-api-status";
 import { InvestigationReport } from "@/components/investigation-report";
+import { createDirectedInvestigationView } from "@/lib/directed-investigation";
 import { messageForInvestigationStatus } from "@/lib/investigation-error";
 import {
   createInvestigationPresentation,
@@ -666,6 +667,13 @@ export function InvestigationWorkspace() {
       result: result.deterministicInvestigationResult,
     });
   }, [result, selectedIncident]);
+  const directedQuery = useMemo(() => {
+    if (!deterministicPresentation || !lastQuestion) {
+      return null;
+    }
+
+    return createDirectedInvestigationView(deterministicPresentation, lastQuestion);
+  }, [deterministicPresentation, lastQuestion]);
 
   useEffect(
     () => () => {
@@ -918,6 +926,37 @@ export function InvestigationWorkspace() {
         .getElementById(`evidence-${evidenceId}`)
         ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }, 0);
+  }
+
+  function revealReportElement(elementId: string) {
+    const target = document.getElementById(elementId);
+    if (!target) return;
+
+    let ancestor = target.parentElement;
+    while (ancestor) {
+      if (ancestor instanceof HTMLDetailsElement) {
+        ancestor.open = true;
+      }
+      ancestor = ancestor.parentElement;
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    const focusTarget = target instanceof HTMLDetailsElement
+      ? target.querySelector<HTMLElement>("summary")
+      : target;
+    focusTarget?.focus({ preventScroll: true });
+  }
+
+  function focusFact(factId: string) {
+    revealReportElement(`fact-${factId}`);
+  }
+
+  function focusEvent(eventId: string) {
+    revealReportElement(`event-${eventId}`);
+  }
+
+  function showFullReport() {
+    revealReportElement("report-full-details");
   }
 
   return (
@@ -1449,7 +1488,11 @@ export function InvestigationWorkspace() {
                     {deterministicPresentation ? (
                       <InvestigationReport
                         presentation={deterministicPresentation}
+                        directedQuery={directedQuery}
                         onSelectEvidence={focusEvidence}
+                        onFocusFact={focusFact}
+                        onFocusEvent={focusEvent}
+                        onShowFullReport={showFullReport}
                       />
                     ) : null}
 

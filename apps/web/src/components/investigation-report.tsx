@@ -5,10 +5,15 @@ import {
   type InvestigationObservation,
   type InvestigationPresentation,
 } from "@/lib/investigation-presentation";
+import type { DirectedInvestigationView } from "@/lib/directed-investigation";
 
 interface InvestigationReportProps {
   presentation: InvestigationPresentation;
+  directedQuery: DirectedInvestigationView | null;
   onSelectEvidence: (evidenceId: string) => void;
+  onFocusFact: (factId: string) => void;
+  onFocusEvent: (eventId: string) => void;
+  onShowFullReport: () => void;
 }
 
 function EvidenceReferences({
@@ -51,20 +56,35 @@ function eventTitle(observation: InvestigationObservation): string {
 function FactList({
   observations,
   onSelectEvidence,
+  onFocusEvent,
+  anchorFacts = false,
 }: {
   observations: InvestigationObservation[];
   onSelectEvidence: (evidenceId: string) => void;
+  onFocusEvent: (eventId: string) => void;
+  anchorFacts?: boolean;
 }) {
   return (
     <ul className="report-fact-list">
       {observations.map((observation, index) => (
-        <li key={`${observation.factId}:${index}`}>
+        <li
+          id={anchorFacts ? `fact-${observation.factId}` : undefined}
+          key={`${observation.factId}:${index}`}
+          tabIndex={anchorFacts ? -1 : undefined}
+        >
           <div className="report-fact-value">
             <span>{labelForProperty(observation.property)}</span>
             <strong>{formatObservationValue(observation)}</strong>
           </div>
           <div className="report-fact-provenance">
             <code>{observation.property}</code>
+            <button
+              className="report-context-link"
+              onClick={() => onFocusEvent(observation.eventId)}
+              type="button"
+            >
+              Consultar evento
+            </button>
             <button
               className="citation-link"
               onClick={() => onSelectEvidence(observation.evidenceId)}
@@ -108,9 +128,151 @@ function FactList({
   );
 }
 
+function FactNavigationList({
+  facts,
+  onFocusFact,
+}: {
+  facts: InvestigationObservation[];
+  onFocusFact: (factId: string) => void;
+}) {
+  return (
+    <ul className="report-context-fact-links">
+      {facts.map((fact) => (
+        <li key={fact.factId}>
+          <button
+            className="report-context-link"
+            onClick={() => onFocusFact(fact.factId)}
+            type="button"
+          >
+            {labelForProperty(fact.property)}: {formatObservationValue(fact)} [{fact.evidenceAlias}]
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function IndicatorCards({
+  indicators,
+  onFocusFact,
+  onSelectEvidence,
+}: {
+  indicators: InvestigationObservation[];
+  onFocusFact: (factId: string) => void;
+  onSelectEvidence: (evidenceId: string) => void;
+}) {
+  return (
+    <div className="report-indicator-grid">
+      {indicators.map((indicator, index) => (
+        <article className="report-indicator" key={`${indicator.factId}:${index}`}>
+          <span>{labelForProperty(indicator.property)}</span>
+          <strong>{formatObservationValue(indicator)}</strong>
+          <small>{indicator.context.timestamp ?? "Timestamp no disponible"}</small>
+          <div className="report-indicator-actions">
+            <button
+              className="report-context-link"
+              onClick={() => onFocusFact(indicator.factId)}
+              type="button"
+            >
+              Consultar hecho
+            </button>
+            <button
+              className="citation-link"
+              onClick={() => onSelectEvidence(indicator.evidenceId)}
+              type="button"
+            >
+              [{indicator.evidenceAlias}]
+            </button>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function DirectedQueryPanel({
+  query,
+  onFocusFact,
+  onFocusEvent,
+  onSelectEvidence,
+  onShowFullReport,
+}: {
+  query: DirectedInvestigationView;
+  onFocusFact: (factId: string) => void;
+  onFocusEvent: (eventId: string) => void;
+  onSelectEvidence: (evidenceId: string) => void;
+  onShowFullReport: () => void;
+}) {
+  return (
+    <section className="report-section report-directed-query" aria-labelledby="directed-query-title">
+      <div className="report-section-heading">
+        <div>
+          <p className="panel-kicker">FILTRO DETERMINISTA LIMITADO</p>
+          <h4 id="directed-query-title">{query.title}</h4>
+        </div>
+        <span className={`report-query-status report-query-status--${query.status}`}>
+          {query.status === "resolved" ? "Vista respaldada" : "Informe general"}
+        </span>
+      </div>
+      <p className="report-query-question">Pregunta original: “{query.originalQuestion}”</p>
+      <p className="report-query-message">{query.message}</p>
+
+      {query.status === "resolved" ? (
+        <div className="report-query-results">
+          {query.facts.length > 0 ? (
+            <details>
+              <summary>{query.facts.length} {query.facts.length === 1 ? "hecho relacionado" : "hechos relacionados"}</summary>
+              <FactNavigationList facts={query.facts} onFocusFact={onFocusFact} />
+            </details>
+          ) : null}
+          {query.events.length > 0 ? (
+            <details>
+              <summary>{query.events.length} {query.events.length === 1 ? "evento relacionado" : "eventos relacionados"}</summary>
+              <ul className="report-context-event-links">
+                {query.events.map((event) => (
+                  <li key={event.eventId}>
+                    <button
+                      className="report-context-link"
+                      onClick={() => onFocusEvent(event.eventId)}
+                      type="button"
+                    >
+                      {eventTitle(event.observations[0])}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+          {query.evidence.length > 0 ? (
+            <div className="report-query-evidence">
+              <span>Evidencias relacionadas:</span>
+              <EvidenceReferences
+                evidence={query.evidence}
+                onSelectEvidence={onSelectEvidence}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <button
+        className="report-context-link report-full-report-link"
+        onClick={onShowFullReport}
+        type="button"
+      >
+        Consultar informe completo
+      </button>
+    </section>
+  );
+}
+
 export function InvestigationReport({
   presentation,
+  directedQuery,
   onSelectEvidence,
+  onFocusFact,
+  onFocusEvent,
+  onShowFullReport,
 }: InvestigationReportProps) {
   return (
     <section className="investigation-report" aria-labelledby="investigation-report-title">
@@ -156,14 +318,36 @@ export function InvestigationReport({
             <dd>{presentation.metadata.aiEnrichmentStatus}</dd>
           </div>
         </dl>
-        <p>{presentation.summary.text}</p>
-        {presentation.summary.conditions.length > 0 ? (
-          <ul className="report-summary-conditions" aria-label="Condiciones observadas">
-            {presentation.summary.conditions.map((condition) => (
-              <li key={condition}>{condition}</li>
-            ))}
-          </ul>
-        ) : null}
+        <div className="report-contextual-summary">
+          <p>{presentation.contextualSummary.observedSummary}</p>
+          {presentation.contextualSummary.statements.length > 0 ? (
+            <ul className="report-contextual-statements" aria-label="Condiciones observadas">
+              {presentation.contextualSummary.statements.map((statement) => (
+                <li key={statement.key}>
+                  <p>{statement.text}</p>
+                  <FactNavigationList facts={statement.facts} onFocusFact={onFocusFact} />
+                  <EvidenceReferences
+                    evidence={statement.evidence}
+                    onSelectEvidence={onSelectEvidence}
+                  />
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="report-summary-uncertainty">
+            <strong>Incertidumbre:</strong> {presentation.contextualSummary.uncertainty}
+          </div>
+          {presentation.contextualSummary.missingInformation.length > 0 ? (
+            <div className="report-summary-missing">
+              <strong>Información que falta para confirmarla:</strong>
+              <ul>
+                {presentation.contextualSummary.missingInformation.map((item, index) => (
+                  <li key={`${item}:${index}`}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
         <div className="report-summary-evidence">
           <span>Evidencia consultable:</span>
           <EvidenceReferences
@@ -173,36 +357,43 @@ export function InvestigationReport({
         </div>
       </section>
 
-      {presentation.indicators.length > 0 ? (
+      {directedQuery ? (
+        <DirectedQueryPanel
+          query={directedQuery}
+          onFocusFact={onFocusFact}
+          onFocusEvent={onFocusEvent}
+          onSelectEvidence={onSelectEvidence}
+          onShowFullReport={onShowFullReport}
+        />
+      ) : null}
+
+      {presentation.highlightedIndicators.length > 0 ? (
         <section className="report-section" aria-labelledby="report-indicators-title">
           <div className="report-section-heading">
             <div>
               <p className="panel-kicker">MEDICIONES ATESTADAS</p>
-              <h4 id="report-indicators-title">Indicadores observados</h4>
+              <h4 id="report-indicators-title">Indicadores destacados</h4>
             </div>
-            <span className="report-section-count">{presentation.indicators.length}</span>
+            <span className="report-section-count">{presentation.highlightedIndicators.length}</span>
           </div>
-          <div className="report-indicator-grid">
-            {presentation.indicators.map((indicator, index) => (
-              <article className="report-indicator" key={`${indicator.factId}:${index}`}>
-                <span>{labelForProperty(indicator.property)}</span>
-                <strong>{formatObservationValue(indicator)}</strong>
-                <small>
-                  {indicator.context.timestamp ?? "Timestamp no disponible"}
-                </small>
-                <button
-                  className="citation-link"
-                  onClick={() => onSelectEvidence(indicator.evidenceId)}
-                  type="button"
-                >
-                  [{indicator.evidenceAlias}]
-                </button>
-              </article>
-            ))}
-          </div>
+          <IndicatorCards
+            indicators={presentation.highlightedIndicators}
+            onFocusFact={onFocusFact}
+            onSelectEvidence={onSelectEvidence}
+          />
           <p className="report-section-note">
             Cada tarjeta representa una medición individual; no se combinan eventos para inferir tendencias o ratios.
           </p>
+          {presentation.indicators.length > presentation.highlightedIndicators.length ? (
+            <details className="report-all-measurements">
+              <summary>Ver todas las mediciones atestadas ({presentation.indicators.length})</summary>
+              <IndicatorCards
+                indicators={presentation.indicators}
+                onFocusFact={onFocusFact}
+                onSelectEvidence={onSelectEvidence}
+              />
+            </details>
+          ) : null}
         </section>
       ) : null}
 
@@ -235,6 +426,7 @@ export function InvestigationReport({
                         <FactList
                           observations={instance.matchedFacts}
                           onSelectEvidence={onSelectEvidence}
+                          onFocusEvent={onFocusEvent}
                         />
                       ) : (
                         <p className="report-conservative-note">
@@ -308,7 +500,7 @@ export function InvestigationReport({
         )}
       </section>
 
-      <section className="report-section" aria-labelledby="report-facts-title">
+      <section className="report-section" id="report-full-details" aria-labelledby="report-facts-title">
         <div className="report-section-heading">
           <div>
             <p className="panel-kicker">HECHOS ATESTADOS</p>
@@ -324,11 +516,13 @@ export function InvestigationReport({
         {presentation.eventFacts.length > 0 ? (
           <div className="report-event-facts">
             {presentation.eventFacts.map((event) => (
-              <details className="report-event-fact-group" key={event.eventId}>
+              <details className="report-event-fact-group" id={`event-${event.eventId}`} key={event.eventId}>
                 <summary>{eventTitle(event.observations[0])}</summary>
                 <FactList
                   observations={event.observations}
                   onSelectEvidence={onSelectEvidence}
+                  onFocusEvent={onFocusEvent}
+                  anchorFacts
                 />
               </details>
             ))}

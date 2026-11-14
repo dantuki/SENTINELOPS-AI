@@ -103,6 +103,23 @@ export interface PresentationEventFacts {
   observations: InvestigationObservation[];
 }
 
+export interface ContextualSummaryStatement {
+  key: string;
+  text: string;
+  factIds: string[];
+  facts: InvestigationObservation[];
+  evidence: InvestigationEvidenceReference[];
+}
+
+export interface ContextualInvestigationSummary {
+  observedSummary: string;
+  supportingFacts: InvestigationObservation[];
+  supportingEvidence: InvestigationEvidenceReference[];
+  uncertainty: string;
+  missingInformation: string[];
+  statements: ContextualSummaryStatement[];
+}
+
 export interface InvestigationPresentation {
   incident: InvestigationPresentationIncident;
   evidence: InvestigationEvidenceReference[];
@@ -118,7 +135,10 @@ export interface InvestigationPresentation {
     conditions: string[];
     retrievedEvidenceCount: number;
   };
+  contextualSummary: ContextualInvestigationSummary;
+  /** All numeric measurements remain available, independent of presentation priority. */
   indicators: InvestigationObservation[];
+  highlightedIndicators: InvestigationObservation[];
   patternGroups: PresentationPatternGroup[];
   eventFacts: PresentationEventFacts[];
   unconfirmed: string[];
@@ -134,14 +154,33 @@ const patternLabels: Record<string, string> = {
   "timeout-observed": "Timeouts observados",
 };
 
+const propertyLabels: Record<string, string> = {
+  active_connections: "Conexiones activas",
+  max_connections: "Límite de conexiones",
+  idle_connections: "Conexiones inactivas",
+  waiting_requests: "Solicitudes en espera",
+  queue_depth: "Elementos en cola",
+  status_code: "Código HTTP",
+  http_status: "Código HTTP",
+  retries_started_last_minute: "Reintentos en el último minuto",
+  retries_last_minute: "Reintentos en el último minuto",
+};
+
+const indicatorRulePriority = [
+  "capacity-at-limit",
+  "no-idle-capacity",
+  "http-5xx-observed",
+  "operational-waiting",
+  "retries-observed",
+  "timeout-observed",
+];
+
 export function labelForPattern(ruleId: string): string {
   return patternLabels[ruleId] ?? `Patrón observado: ${ruleId}`;
 }
 
 export function labelForProperty(property: string): string {
-  return property
-    .replace(/[_-]+/gu, " ")
-    .replace(/^./u, (letter) => letter.toLocaleUpperCase("es-CO"));
+  return propertyLabels[property] ?? property;
 }
 
 export function formatObservationValue(
@@ -207,6 +246,142 @@ function groupFactsByEvent(
     .map(({ firstIndex: _firstIndex, ...event }) => event);
 }
 
+function uniqueFacts(
+  observations: readonly InvestigationObservation[],
+): InvestigationObservation[] {
+  const facts = new Map<string, InvestigationObservation>();
+
+  for (const observation of observations) {
+    if (!facts.has(observation.factId)) {
+      facts.set(observation.factId, observation);
+    }
+  }
+
+  return [...facts.values()];
+}
+
+function contextualStatementFor(
+  group: PresentationPatternGroup,
+): string {
+  const first = group.instances[0];
+  const facts = first?.matchedFacts ?? [];
+
+  switch (group.ruleId) {
+    case "capacity-at-limit":
+      return facts.length >= 2
+        ? `Se observó ${labelForProperty(facts[0].property)} al nivel de ${labelForProperty(facts[1].property)} o por encima de este en un mismo evento.`
+        : "Se observó una capacidad activa al límite en un mismo evento.";
+    case "no-idle-capacity":
+      return facts[0]
+        ? `Se observó ${labelForProperty(facts[0].property)} con valor ${formatObservationValue(facts[0])}.`
+        : "Se observó ausencia de capacidad inactiva en un evento.";
+    case "operational-waiting":
+      return facts[0]
+        ? `Se observó ${labelForProperty(facts[0].property)} con valor positivo.`
+        : "Se observaron elementos en espera.";
+    case "retries-observed":
+      return facts[0]
+        ? `Se observó ${labelForProperty(facts[0].property)} con valor positivo.`
+        : "Se observaron reintentos o intentos adicionales.";
+    case "http-5xx-observed":
+      return "Se observó una respuesta HTTP 5xx.";
+    case "timeout-observed":
+      return "Se observó un timeout explícito o un campo de timeout.";
+    default:
+      return first?.description ?? `Se observó el patrón ${group.ruleId}.`;
+  }
+}
+
+function createContextualSummary(input: {
+  result: DeterministicInvestigationPresentationInput;
+  patternGroups: PresentationPatternGroup[];
+  evidenceById: ReadonlyMap<string, InvestigationEvidenceReference>;
+}): ContextualInvestigationSummary {
+  const statements = input.patternGroups.map((group) => {
+    const facts = uniqueFacts(
+      group.instances.flatMap((instance) => instance.matchedFacts),
+    );
+    const factIds = uniqueStrings(facts.map((fact) => fact.factId));
+    const evidence = referencesFor(
+      group.instances.flatMap((instance) => [
+        ...instance.evidence.map((reference) => reference.evidenceId),
+        ...instance.matchedFacts.map((fact) => fact.evidenceId),
+      ]),
+      input.evidenceById,
+    );
+
+    return {
+      key: `summary:${group.ruleId}`,
+      text: contextualStatementFor(group),
+      factIds,
+      facts,
+      evidence,
+    };
+  });
+  const supportingFacts = uniqueFacts(
+    statements.flatMap((statement) => statement.facts),
+  );
+  const uncertainty =
+    input.result.hypotheses[0]?.statement ??
+    "La causa raíz no se puede determinar con la evidencia disponible.";
+  const missingInformation = uniqueStrings(
+    input.result.hypotheses.flatMap((hypothesis) => hypothesis.missingEvidence),
+  );
+
+  return {
+    observedSummary: statements.length > 0
+      ? statements[0]!.text
+      : "No se identificaron patrones con evidencia suficiente para resumir condiciones observadas.",
+    supportingFacts,
+    supportingEvidence: referencesFor(
+      statements.flatMap((statement) =>
+        statement.evidence.map((reference) => reference.evidenceId),
+      ),
+      input.evidenceById,
+    ),
+    uncertainty,
+    missingInformation,
+    statements,
+  };
+}
+
+function highlightedIndicatorsFor(input: {
+  patterns: readonly InvestigationPattern[];
+  factsById: ReadonlyMap<string, InvestigationObservation>;
+  allIndicators: readonly InvestigationObservation[];
+}): InvestigationObservation[] {
+  const priority = new Map(
+    indicatorRulePriority.map((ruleId, index) => [ruleId, index]),
+  );
+  const rankedPatterns = input.patterns
+    .map((pattern, index) => ({
+      pattern,
+      index,
+      priority: priority.get(pattern.ruleId) ?? indicatorRulePriority.length,
+    }))
+    .sort((first, second) => first.priority - second.priority || first.index - second.index);
+  const selected = new Map<string, InvestigationObservation>();
+
+  for (const { pattern } of rankedPatterns) {
+    for (const factId of pattern.matchedFactIds) {
+      const fact = input.factsById.get(factId);
+      if (fact && typeof fact.value === "number" && !selected.has(fact.factId)) {
+        selected.set(fact.factId, fact);
+        if (selected.size === 5) return [...selected.values()];
+      }
+    }
+  }
+
+  for (const indicator of input.allIndicators) {
+    if (!selected.has(indicator.factId)) {
+      selected.set(indicator.factId, indicator);
+      if (selected.size === 5) break;
+    }
+  }
+
+  return [...selected.values()];
+}
+
 /**
  * Creates a deterministic, UI-only organization of the serialized result.
  * It never joins measurements across events or emits a causal conclusion.
@@ -223,7 +398,6 @@ export function createInvestigationPresentation(
       observation,
     ]),
   );
-  const patternFactIds = new Set<string>();
   const groups = new Map<string, PresentationPatternGroup>();
 
   for (const pattern of input.result.detectedPatterns) {
@@ -257,15 +431,10 @@ export function createInvestigationPresentation(
         instances: [instance],
       });
     }
-
-    for (const factId of pattern.matchedFactIds) {
-      patternFactIds.add(factId);
-    }
   }
 
   const indicators = input.result.verifiedObservations.filter(
-    (observation) =>
-      typeof observation.value === "number" && patternFactIds.has(observation.factId),
+    (observation) => typeof observation.value === "number",
   );
   const allReferencedEvidence = referencesFor(
     uniqueStrings([
@@ -295,7 +464,17 @@ export function createInvestigationPresentation(
       conditions: [...groups.values()].map((group) => group.label),
       retrievedEvidenceCount: input.evidence.length,
     },
+    contextualSummary: createContextualSummary({
+      result: input.result,
+      patternGroups: [...groups.values()],
+      evidenceById,
+    }),
     indicators,
+    highlightedIndicators: highlightedIndicatorsFor({
+      patterns: input.result.detectedPatterns,
+      factsById,
+      allIndicators: indicators,
+    }),
     patternGroups: [...groups.values()],
     eventFacts: groupFactsByEvent(input.result.verifiedObservations),
     unconfirmed: uniqueStrings([
