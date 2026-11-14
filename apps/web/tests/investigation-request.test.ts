@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { deterministicPatternKey } from "../src/lib/deterministic-pattern.ts";
 import { isInvestigationRequest } from "../src/lib/investigation-request.ts";
 import { messageForInvestigationStatus } from "../src/lib/investigation-error.ts";
 
@@ -44,4 +45,25 @@ test("the investigation UI distinguishes server responses from connectivity fail
   );
   assert.equal(
     messageForInvestigationStatus(504), "La investigación tardó demasiado. Puedes reintentarlo.");
+});
+
+test("deterministic patterns retain repeated rule instances from distinct facts", () => {
+  const patterns = [
+    {
+      ruleId: "operational-waiting",
+      matchedFactIds: ["fact:evidence-1:event-14:waiting_requests"],
+      evidenceRefs: ["evidence-1"],
+    },
+    {
+      ruleId: "operational-waiting",
+      matchedFactIds: ["fact:evidence-1:event-35:waiting_requests"],
+      evidenceRefs: ["evidence-1"],
+    },
+  ];
+
+  const keys = patterns.map(deterministicPatternKey);
+
+  assert.equal(keys.length, 2);
+  assert.equal(new Set(keys).size, 2);
+  assert.notEqual(keys[0], keys[1]);
 });

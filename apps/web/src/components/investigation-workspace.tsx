@@ -1,6 +1,7 @@
 "use client";
 
 import { ProductApiStatus } from "@/components/product-api-status";
+import { deterministicPatternKey } from "@/lib/deterministic-pattern";
 import { messageForInvestigationStatus } from "@/lib/investigation-error";
 import {
   useEffect,
@@ -98,7 +99,12 @@ interface DeterministicInvestigationResult {
   mode: "deterministic" | "hybrid" | "ai";
   status: "complete" | "partial" | "insufficient_evidence";
   verifiedObservations: Array<{ evidenceAlias: string; eventId: string; property: string; value: string | number | boolean | null; unit: string | null }>;
-  detectedPatterns: Array<{ ruleId: string; description: string; evidenceRefs: string[] }>;
+  detectedPatterns: Array<{
+    ruleId: string;
+    description: string;
+    matchedFactIds: string[];
+    evidenceRefs: string[];
+  }>;
   hypotheses: Array<{ statement: string; status: "insufficient_evidence"; missingEvidence: string[] }>;
   limitations: string[];
   recommendedChecks: string[];
@@ -319,6 +325,15 @@ function isDeterministicInvestigationResult(value: unknown): value is Determinis
     ["deterministic", "hybrid", "ai"].includes(String(value.mode)) &&
     ["complete", "partial", "insufficient_evidence"].includes(String(value.status)) &&
     Array.isArray(value.verifiedObservations) && Array.isArray(value.detectedPatterns) &&
+    value.detectedPatterns.every((pattern) =>
+      isRecord(pattern) && typeof pattern.ruleId === "string" &&
+      typeof pattern.description === "string" &&
+      Array.isArray(pattern.matchedFactIds) &&
+      pattern.matchedFactIds.length > 0 &&
+      pattern.matchedFactIds.every((factId) => typeof factId === "string" && factId.length > 0) &&
+      Array.isArray(pattern.evidenceRefs) &&
+      pattern.evidenceRefs.every((evidenceId) => typeof evidenceId === "string" && evidenceId.length > 0),
+    ) &&
     Array.isArray(value.hypotheses) && Array.isArray(value.limitations) &&
     Array.isArray(value.recommendedChecks) && isRecord(value.aiEnrichment) &&
     ["not_requested", "unavailable", "invalid", "validated"].includes(String(value.aiEnrichment.status)) &&
@@ -1374,7 +1389,7 @@ export function InvestigationWorkspace() {
                         <h5>VERIFIED OBSERVATION</h5>
                         <ul>{result.deterministicInvestigationResult.verifiedObservations.map((observation) => <li key={`${observation.eventId}:${observation.property}`}><code>{observation.property}</code>: {String(observation.value)}{observation.unit ? ` ${observation.unit}` : ""} [{observation.evidenceAlias}]</li>)}</ul>
                         <h5>DETECTED PATTERN</h5>
-                        <ul>{result.deterministicInvestigationResult.detectedPatterns.length > 0 ? result.deterministicInvestigationResult.detectedPatterns.map((pattern) => <li key={pattern.ruleId}>{pattern.description}</li>) : <li>No se detectó un patrón con evidencia suficiente.</li>}</ul>
+                        <ul>{result.deterministicInvestigationResult.detectedPatterns.length > 0 ? result.deterministicInvestigationResult.detectedPatterns.map((pattern) => <li key={deterministicPatternKey(pattern)}>{pattern.description}</li>) : <li>No se detectó un patrón con evidencia suficiente.</li>}</ul>
                         <h5>UNCONFIRMED HYPOTHESIS</h5>
                         <ul>{result.deterministicInvestigationResult.hypotheses.map((hypothesis) => <li key={hypothesis.statement}>{hypothesis.statement}</li>)}</ul>
                         <h5>Comprobaciones recomendadas</h5>
