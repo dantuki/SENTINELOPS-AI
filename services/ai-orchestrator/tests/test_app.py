@@ -153,6 +153,37 @@ def test_readiness_endpoint_returns_503_when_a_model_is_not_loaded() -> None:
     }
 
 
+def test_readiness_snapshot_does_not_mask_a_later_embedding_outage() -> None:
+    """Readiness only reflects the preceding /api/ps observation."""
+
+    async def loaded_models() -> set[str]:
+        return {EMBEDDING_MODEL, "qwen3.5:4b"}
+
+    async def unavailable_generator(
+        texts: list[str],
+    ) -> tuple[str, list[list[float]]]:
+        raise EmbeddingProviderUnavailable
+
+    app.dependency_overrides[get_model_readiness_checker] = (
+        lambda: loaded_models
+    )
+    app.dependency_overrides[get_embedding_generator] = (
+        lambda: unavailable_generator
+    )
+
+    readiness = client.get("/ready")
+    embedding = client.post(
+        "/embeddings",
+        json={"texts": ["Sonda de disponibilidad"]},
+    )
+
+    assert readiness.status_code == 200
+    assert embedding.status_code == 503
+    assert embedding.json() == {
+        "detail": "Local embedding model service is unavailable."
+    }
+
+
 def test_internal_service_routes_reject_missing_service_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,7 @@
 "use client";
 
 import { ProductApiStatus } from "@/components/product-api-status";
+import { messageForInvestigationStatus } from "@/lib/investigation-error";
 import {
   useEffect,
   useRef,
@@ -351,26 +352,6 @@ function isListPayload<T>(
   );
 }
 
-function messageForStatus(status: number): string {
-  if (status === 400) {
-    return "Revisa los datos de la solicitud e inténtalo de nuevo.";
-  }
-
-  if (status === 404) {
-    return "El recurso seleccionado ya no está disponible.";
-  }
-
-  if (status === 502) {
-    return "El servicio devolvió una respuesta no válida.";
-  }
-
-  if (status === 504) {
-    return "La investigación tardó demasiado. Puedes reintentarlo.";
-  }
-
-  return "No se pudo conectar con el servicio. Comprueba su estado e inténtalo de nuevo.";
-}
-
 async function requestList<T>(
   url: string,
   signal: AbortSignal,
@@ -382,7 +363,7 @@ async function requestList<T>(
   });
 
   if (!response.ok) {
-    throw new ApiRequestError(messageForStatus(response.status));
+    throw new ApiRequestError(messageForInvestigationStatus(response.status));
   }
 
   let payload: unknown;
@@ -793,7 +774,7 @@ export function InvestigationWorkspace() {
       );
 
       if (!response.ok) {
-        throw new ApiRequestError(messageForStatus(response.status));
+        throw new ApiRequestError(messageForInvestigationStatus(response.status));
       }
 
       let payload: unknown;
