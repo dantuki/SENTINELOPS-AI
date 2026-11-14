@@ -1,10 +1,17 @@
 "use client";
 
 import { ProductApiStatus } from "@/components/product-api-status";
-import { deterministicPatternKey } from "@/lib/deterministic-pattern";
+import { InvestigationReport } from "@/components/investigation-report";
 import { messageForInvestigationStatus } from "@/lib/investigation-error";
 import {
+  createInvestigationPresentation,
+  type InvestigationHypothesis,
+  type InvestigationObservation,
+  type InvestigationPattern,
+} from "@/lib/investigation-presentation";
+import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -98,14 +105,9 @@ interface DeterministicInvestigationResult {
   schemaVersion: "investigation-result-v2";
   mode: "deterministic" | "hybrid" | "ai";
   status: "complete" | "partial" | "insufficient_evidence";
-  verifiedObservations: Array<{ evidenceAlias: string; eventId: string; property: string; value: string | number | boolean | null; unit: string | null }>;
-  detectedPatterns: Array<{
-    ruleId: string;
-    description: string;
-    matchedFactIds: string[];
-    evidenceRefs: string[];
-  }>;
-  hypotheses: Array<{ statement: string; status: "insufficient_evidence"; missingEvidence: string[] }>;
+  verifiedObservations: InvestigationObservation[];
+  detectedPatterns: InvestigationPattern[];
+  hypotheses: InvestigationHypothesis[];
   limitations: string[];
   recommendedChecks: string[];
   aiEnrichment: { status: "not_requested" | "unavailable" | "invalid" | "validated"; model: string | null; failure: string | null };
@@ -114,14 +116,7 @@ interface DeterministicInvestigationResult {
 
 interface VerifiedInvestigationResult {
   version: "verified-investigation-result-v1";
-  verifiedObservations: Array<{
-    evidenceAlias: string;
-    eventId: string;
-    property: string;
-    value: string | number | boolean | null;
-    unit: string | null;
-    verificationStatus: "verified";
-  }>;
+  verifiedObservations: InvestigationObservation[];
   aiAnalysis: {
     status: "validated" | "not_invoked" | "invalid";
     failure: string;
@@ -308,14 +303,57 @@ function isInvestigationAnalysis(
   );
 }
 
+function isStringOrNull(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isInvestigationObservation(
+  value: unknown,
+): value is InvestigationObservation {
+  if (!isRecord(value) || !isRecord(value.context) || !isRecord(value.sourceLocator)) {
+    return false;
+  }
+  const context = value.context;
+  const sourceLocator = value.sourceLocator;
+
+  return [
+    "factId",
+    "evidenceId",
+    "evidenceAlias",
+    "eventId",
+    "projectId",
+    "incidentId",
+    "documentId",
+    "sourceId",
+    "property",
+  ].every((key) => typeof value[key] === "string") &&
+    ((typeof value.value === "string" && value.valueType === "string") ||
+      (typeof value.value === "number" &&
+        Number.isFinite(value.value) &&
+        value.valueType === "number") ||
+      (typeof value.value === "boolean" && value.valueType === "boolean") ||
+      (value.value === null && value.valueType === "null")) &&
+    isStringOrNull(value.unit) &&
+    ["event", "timestamp", "service", "incidentRequestId"].every((key) =>
+      isStringOrNull(context[key]),
+    ) &&
+    Number.isInteger(sourceLocator.line) &&
+    Number.isInteger(sourceLocator.startOffset) &&
+    Number.isInteger(sourceLocator.endOffset) &&
+    typeof sourceLocator.recordContentHash === "string" &&
+    value.extractionMethod === "jsonl_record" &&
+    value.verificationStatus === "verified";
+}
+
 function isVerifiedInvestigationResult(value: unknown): value is VerifiedInvestigationResult {
   return isRecord(value) && value.version === "verified-investigation-result-v1" &&
     Array.isArray(value.verifiedObservations) &&
-    value.verifiedObservations.every((observation) =>
-      isRecord(observation) && typeof observation.evidenceAlias === "string" &&
-      typeof observation.eventId === "string" && typeof observation.property === "string" &&
-      (["string", "number", "boolean"].includes(typeof observation.value) || observation.value === null),
-    ) && isRecord(value.aiAnalysis) &&
+    value.verifiedObservations.every(isInvestigationObservation) &&
+    isRecord(value.aiAnalysis) &&
     ["validated", "not_invoked", "invalid"].includes(String(value.aiAnalysis.status)) &&
     typeof value.aiAnalysis.failure === "string";
 }
@@ -324,7 +362,9 @@ function isDeterministicInvestigationResult(value: unknown): value is Determinis
   return isRecord(value) && value.schemaVersion === "investigation-result-v2" &&
     ["deterministic", "hybrid", "ai"].includes(String(value.mode)) &&
     ["complete", "partial", "insufficient_evidence"].includes(String(value.status)) &&
-    Array.isArray(value.verifiedObservations) && Array.isArray(value.detectedPatterns) &&
+    Array.isArray(value.verifiedObservations) &&
+    value.verifiedObservations.every(isInvestigationObservation) &&
+    Array.isArray(value.detectedPatterns) &&
     value.detectedPatterns.every((pattern) =>
       isRecord(pattern) && typeof pattern.ruleId === "string" &&
       typeof pattern.description === "string" &&
@@ -334,11 +374,19 @@ function isDeterministicInvestigationResult(value: unknown): value is Determinis
       Array.isArray(pattern.evidenceRefs) &&
       pattern.evidenceRefs.every((evidenceId) => typeof evidenceId === "string" && evidenceId.length > 0),
     ) &&
-    Array.isArray(value.hypotheses) && Array.isArray(value.limitations) &&
-    Array.isArray(value.recommendedChecks) && isRecord(value.aiEnrichment) &&
+    Array.isArray(value.hypotheses) &&
+    value.hypotheses.every((hypothesis) =>
+      isRecord(hypothesis) && typeof hypothesis.statement === "string" &&
+      hypothesis.status === "insufficient_evidence" &&
+      isStringArray(hypothesis.missingEvidence),
+    ) &&
+    isStringArray(value.limitations) && isStringArray(value.recommendedChecks) &&
+    isRecord(value.aiEnrichment) &&
     ["not_requested", "unavailable", "invalid", "validated"].includes(String(value.aiEnrichment.status)) &&
+    isStringOrNull(value.aiEnrichment.model) && isStringOrNull(value.aiEnrichment.failure) &&
     isRecord(value.gateResult) && value.gateResult.gate === "evidence-first-deterministic-product-gate-v2" &&
-    ["pass", "fail"].includes(String(value.gateResult.status));
+    ["pass", "fail"].includes(String(value.gateResult.status)) &&
+    isStringArray(value.gateResult.reasons);
 }
 
 function isInvestigationResult(
@@ -602,6 +650,22 @@ export function InvestigationWorkspace() {
   const syntheticEvidence = result
     ? isSyntheticEvidence(result.evidence)
     : false;
+  const deterministicPresentation = useMemo(() => {
+    if (!result?.deterministicInvestigationResult || !selectedIncident) {
+      return null;
+    }
+
+    return createInvestigationPresentation({
+      incident: {
+        reference:
+          selectedIncident.externalReference?.trim() || selectedIncident.id,
+        title: selectedIncident.title,
+        serviceName: selectedIncident.serviceName,
+      },
+      evidence: result.evidence,
+      result: result.deterministicInvestigationResult,
+    });
+  }, [result, selectedIncident]);
 
   useEffect(
     () => () => {
@@ -1331,7 +1395,9 @@ export function InvestigationWorkspace() {
                       <div>
                         <p className="panel-kicker">RESULTADO DE INVESTIGACIÓN</p>
                         <h3 id="response-title">
-                          {result.evidence.length > 0
+                          {deterministicPresentation
+                            ? "Informe basado en evidencia atestada"
+                            : result.evidence.length > 0
                             ? "Respuesta basada en evidencia"
                             : "Evidencia insuficiente"}
                         </h3>
@@ -1362,7 +1428,7 @@ export function InvestigationWorkspace() {
                       </div>
                     ) : null}
 
-                    {result.verifiedInvestigationResult ? (
+                    {!deterministicPresentation && result.verifiedInvestigationResult ? (
                       <section className="response-section" aria-labelledby="verified-observations-title">
                         <h4 id="verified-observations-title">Hechos verificados</h4>
                         <p>
@@ -1380,56 +1446,48 @@ export function InvestigationWorkspace() {
                       </section>
                     ) : null}
 
-                    {result.deterministicInvestigationResult ? (
-                      <section className="response-section" aria-labelledby="deterministic-result-title">
-                        <h4 id="deterministic-result-title">Investigación determinista</h4>
-                        <p>
-                          Modo: {result.deterministicInvestigationResult.mode}. Enriquecimiento IA: {result.deterministicInvestigationResult.aiEnrichment.status}. Gate de producto V2: {result.deterministicInvestigationResult.gateResult.status}.
-                        </p>
-                        <h5>VERIFIED OBSERVATION</h5>
-                        <ul>{result.deterministicInvestigationResult.verifiedObservations.map((observation) => <li key={`${observation.eventId}:${observation.property}`}><code>{observation.property}</code>: {String(observation.value)}{observation.unit ? ` ${observation.unit}` : ""} [{observation.evidenceAlias}]</li>)}</ul>
-                        <h5>DETECTED PATTERN</h5>
-                        <ul>{result.deterministicInvestigationResult.detectedPatterns.length > 0 ? result.deterministicInvestigationResult.detectedPatterns.map((pattern) => <li key={deterministicPatternKey(pattern)}>{pattern.description}</li>) : <li>No se detectó un patrón con evidencia suficiente.</li>}</ul>
-                        <h5>UNCONFIRMED HYPOTHESIS</h5>
-                        <ul>{result.deterministicInvestigationResult.hypotheses.map((hypothesis) => <li key={hypothesis.statement}>{hypothesis.statement}</li>)}</ul>
-                        <h5>Comprobaciones recomendadas</h5>
-                        <ul>{result.deterministicInvestigationResult.recommendedChecks.map((check) => <li key={check}>{check}</li>)}</ul>
-                      </section>
+                    {deterministicPresentation ? (
+                      <InvestigationReport
+                        presentation={deterministicPresentation}
+                        onSelectEvidence={focusEvidence}
+                      />
                     ) : null}
 
-                    <div className="response-sections">
-                      {splitResponseSections(result.response).map(
-                        (section, index) => (
-                          <section
-                            className="response-section"
-                            key={`${section.title ?? "respuesta"}-${index}`}
-                          >
-                            {section.title ? <h4>{section.title}</h4> : null}
-                            <p>
-                              {section.content.split(/\r?\n/u).map(
-                                (line, lineIndex) => (
-                                  <span
-                                    key={`${index}-${lineIndex}`}
-                                    className={
-                                      line.length === 0
-                                        ? "response-line response-line--empty"
-                                        : "response-line"
-                                    }
-                                  >
-                                    {renderCitations(
-                                      line,
-                                      result.evidence,
-                                      focusEvidence,
-                                    )}
-                                    <br />
-                                  </span>
-                                ),
-                              )}
-                            </p>
-                          </section>
-                        ),
-                      )}
-                    </div>
+                    {!deterministicPresentation ? (
+                      <div className="response-sections">
+                        {splitResponseSections(result.response).map(
+                          (section, index) => (
+                            <section
+                              className="response-section"
+                              key={`${section.title ?? "respuesta"}-${index}`}
+                            >
+                              {section.title ? <h4>{section.title}</h4> : null}
+                              <p>
+                                {section.content.split(/\r?\n/u).map(
+                                  (line, lineIndex) => (
+                                    <span
+                                      key={`${index}-${lineIndex}`}
+                                      className={
+                                        line.length === 0
+                                          ? "response-line response-line--empty"
+                                          : "response-line"
+                                      }
+                                    >
+                                      {renderCitations(
+                                        line,
+                                        result.evidence,
+                                        focusEvidence,
+                                      )}
+                                      <br />
+                                    </span>
+                                  ),
+                                )}
+                              </p>
+                            </section>
+                          ),
+                        )}
+                      </div>
+                    ) : null}
                   </section>
                 ) : null}
               </section>
