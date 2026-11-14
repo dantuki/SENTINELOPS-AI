@@ -3,7 +3,7 @@ import { KnowledgeBase } from "@/components/knowledge-base";
 import { requireAuthenticatedPage } from "@/lib/auth-page";
 
 export default async function KnowledgeBasePage() {
-  const user = await requireAuthenticatedPage();
+  const user = await requireAuthenticatedPage("/knowledge-base");
   return (
     <AuthShell email={user.email}>
       <KnowledgeBase />

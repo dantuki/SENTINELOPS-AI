@@ -338,8 +338,8 @@ export function QaWorkspace() {
     <main className="qa-app">
       <aside className="qa-sidebar" aria-label="Navegación de QA">
         <a className="qa-brand" href="/qa" aria-label="SentinelOps QA, inicio">
-          <span aria-hidden="true">S</span>
-          <strong>SentinelOps <small>QA</small></strong>
+          <span className="qa-brand-mark" aria-hidden="true">S</span>
+          <span className="qa-brand-name">SentinelOps <small>QA</small></span>
         </a>
         <nav className="qa-nav">
           <a className="qa-nav-active" href="/qa">Asistente de QA</a>

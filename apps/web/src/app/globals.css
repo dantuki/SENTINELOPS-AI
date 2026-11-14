@@ -75,6 +75,19 @@ body::before {
   font-size: 13px;
 }
 
+.auth-nav {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-nav a:hover {
+  color: var(--text);
+}
+
 .auth-header button,
 .login-card button {
   min-height: 42px;
@@ -175,13 +188,16 @@ a:focus-visible {
 }
 
 .qa-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
   color: var(--accent);
   font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.14em;
 }
 
-.qa-brand::after {
+.qa-brand-name::after {
   display: block;
   margin-top: 4px;
   color: var(--muted);
@@ -189,6 +205,24 @@ a:focus-visible {
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.15em;
+}
+
+.qa-brand-mark {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid rgba(156, 230, 197, 0.42);
+  border-radius: 8px;
+  background: rgba(83, 212, 160, 0.1);
+}
+
+.qa-brand-name {
+  line-height: 1;
+}
+
+.qa-brand-name small {
+  font-size: inherit;
 }
 
 .qa-nav {
@@ -576,6 +610,18 @@ a:focus-visible {
 }
 
 @media (max-width: 780px) {
+  .auth-header {
+    flex-wrap: wrap;
+  }
+
+  .auth-nav {
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
   .qa-app {
     grid-template-columns: 1fr;
   }

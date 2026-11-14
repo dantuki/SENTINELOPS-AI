@@ -7,7 +7,7 @@
     "dev": "next dev --hostname 127.0.0.1 --port 3000",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3000",
-    "test": "node --experimental-transform-types --test tests/investigation-request.test.ts tests/qa-presentation.test.ts",
+    "test": "node --experimental-transform-types --test tests/investigation-request.test.ts tests/qa-presentation.test.ts tests/auth-redirect.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

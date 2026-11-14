@@ -1,6 +1,8 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { loginPathFor } from "@/lib/auth-redirect";
+
 export interface CurrentUser {
   id: string;
   email: string;
@@ -8,11 +10,29 @@ export interface CurrentUser {
   lastLoginAt: string | null;
 }
 
-export async function requireAuthenticatedPage(): Promise<CurrentUser> {
+function isCurrentUserResponse(value: unknown): value is { data: CurrentUser } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "data" in value &&
+    typeof value.data === "object" &&
+    value.data !== null &&
+    "id" in value.data &&
+    typeof value.data.id === "string" &&
+    "email" in value.data &&
+    typeof value.data.email === "string" &&
+    "instanceRole" in value.data &&
+    (value.data.instanceRole === null || value.data.instanceRole === "INSTANCE_ADMIN") &&
+    "lastLoginAt" in value.data &&
+    (value.data.lastLoginAt === null || typeof value.data.lastLoginAt === "string")
+  );
+}
+
+export async function getAuthenticatedUser(): Promise<CurrentUser | null> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
   if (!cookie) {
-    redirect("/login");
+    return null;
   }
 
   const apiUrl =
@@ -25,33 +45,15 @@ export async function requireAuthenticatedPage(): Promise<CurrentUser> {
       signal: AbortSignal.timeout(3_000),
     });
   } catch {
-    redirect("/login?unavailable=1");
+    return null;
   }
 
   if (!response.ok) {
-    redirect("/login");
+    return null;
   }
 
   const payload: unknown = await response.json();
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    !("data" in payload) ||
-    typeof payload.data !== "object" ||
-    payload.data === null ||
-    !("id" in payload.data) ||
-    typeof payload.data.id !== "string" ||
-    !("email" in payload.data) ||
-    typeof payload.data.email !== "string" ||
-    !("instanceRole" in payload.data) ||
-    (payload.data.instanceRole !== null &&
-      payload.data.instanceRole !== "INSTANCE_ADMIN") ||
-    !("lastLoginAt" in payload.data) ||
-    (payload.data.lastLoginAt !== null &&
-      typeof payload.data.lastLoginAt !== "string")
-  ) {
-    redirect("/login");
-  }
+  if (!isCurrentUserResponse(payload)) return null;
 
   return {
     id: payload.data.id,
@@ -59,4 +61,12 @@ export async function requireAuthenticatedPage(): Promise<CurrentUser> {
     instanceRole: payload.data.instanceRole,
     lastLoginAt: payload.data.lastLoginAt,
   };
+}
+
+export async function requireAuthenticatedPage(
+  returnTo: string,
+): Promise<CurrentUser> {
+  const user = await getAuthenticatedUser();
+  if (!user) redirect(loginPathFor(returnTo));
+  return user;
 }

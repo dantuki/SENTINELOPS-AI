@@ -3,7 +3,7 @@ import { InvestigationWorkspace } from "@/components/investigation-workspace";
 import { requireAuthenticatedPage } from "@/lib/auth-page";
 
 export default async function InvestigationPage() {
-  const user = await requireAuthenticatedPage();
+  const user = await requireAuthenticatedPage("/investigation");
   return (
     <AuthShell email={user.email}>
       <InvestigationWorkspace />
