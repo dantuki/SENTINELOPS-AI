@@ -3,51 +3,7 @@ import {
   invalidRequest,
   isUuid,
 } from "@/lib/product-api";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value)
-  );
-}
-
-function isInvestigationRequest(
-  value: unknown,
-): value is {
-  question: string;
-  limit?: number;
-  incidentId?: string;
-} {
-  if (
-    !isRecord(value) ||
-    !Object.keys(value).every((key) =>
-      ["question", "limit", "incidentId"].includes(key),
-    ) ||
-    typeof value.question !== "string" ||
-    value.question.trim().length === 0 ||
-    value.question.length > 20_000
-  ) {
-    return false;
-  }
-
-  if (
-    value.limit !== undefined &&
-    (typeof value.limit !== "number" ||
-      !Number.isInteger(value.limit) ||
-      value.limit < 1 ||
-      value.limit > 20)
-  ) {
-    return false;
-  }
-
-  return (
-    value.incidentId === undefined ||
-    (typeof value.incidentId === "string" &&
-      value.incidentId.trim().length > 0 &&
-      value.incidentId.length <= 100)
-  );
-}
+import { isInvestigationRequest } from "@/lib/investigation-request";
 
 export async function POST(
   request: Request,

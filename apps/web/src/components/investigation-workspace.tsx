@@ -50,11 +50,13 @@ interface Incident {
 }
 
 interface Evidence {
-  id: string;
+  evidenceId: string;
+  alias: string;
   documentId: string;
   ordinal: number;
+  rank: number;
   content: string;
-  similarity: number;
+  score: number;
 }
 
 type HypothesisStatus =
@@ -221,12 +223,14 @@ function isIncident(value: unknown): value is Incident {
 function isEvidence(value: unknown): value is Evidence {
   return (
     isRecord(value) &&
-    typeof value.id === "string" &&
+    typeof value.evidenceId === "string" &&
+    typeof value.alias === "string" &&
     typeof value.documentId === "string" &&
     Number.isInteger(value.ordinal) &&
+    Number.isInteger(value.rank) &&
     typeof value.content === "string" &&
-    typeof value.similarity === "number" &&
-    Number.isFinite(value.similarity)
+    typeof value.score === "number" &&
+    Number.isFinite(value.score)
   );
 }
 
@@ -456,7 +460,7 @@ function parseTimeline(evidence: Evidence[]): TimelineEvent[] {
                 typeof value.message === "string"
                   ? value.message
                   : null,
-              evidenceId: item.id,
+              evidenceId: item.evidenceId,
               evidenceNumber: index + 1,
             },
           ];
@@ -548,7 +552,7 @@ function renderCitations(
         <button
           className="citation-link"
           key={`${match.index}-${match[1]}`}
-          onClick={() => onSelect(citedEvidence.id)}
+          onClick={() => onSelect(citedEvidence.evidenceId)}
           type="button"
           aria-label={`Consultar evidencia E${match[1]}`}
         >
@@ -1456,12 +1460,12 @@ export function InvestigationWorkspace() {
                     {result.evidence.map((item, index) => (
                       <article
                         className={`evidence-card ${
-                          expandedEvidenceId === item.id
+                          expandedEvidenceId === item.evidenceId
                             ? "evidence-card--selected"
                             : ""
                         }`}
-                        id={`evidence-${item.id}`}
-                        key={item.id}
+                        id={`evidence-${item.evidenceId}`}
+                        key={item.evidenceId}
                       >
                         <div className="evidence-card-top">
                           <span className="evidence-reference">
@@ -1470,9 +1474,9 @@ export function InvestigationWorkspace() {
                           <span
                             className="evidence-similarity"
                             title="Similitud de recuperación; no mide confianza causal"
-                            aria-label={`Similitud de recuperación: ${item.similarity.toFixed(3)}`}
+                            aria-label={`Similitud de recuperación: ${item.score.toFixed(3)}`}
                           >
-                            Sim. {item.similarity.toFixed(3)}
+                            Sim. {item.score.toFixed(3)}
                           </span>
                         </div>
                         <p className="evidence-document">
@@ -1487,18 +1491,18 @@ export function InvestigationWorkspace() {
                         <button
                           className="evidence-toggle"
                           type="button"
-                          aria-expanded={expandedEvidenceId === item.id}
+                          aria-expanded={expandedEvidenceId === item.evidenceId}
                           onClick={() =>
                             setExpandedEvidenceId((current) =>
-                              current === item.id ? "" : item.id,
+                              current === item.evidenceId ? "" : item.evidenceId,
                             )
                           }
                         >
-                          {expandedEvidenceId === item.id
+                          {expandedEvidenceId === item.evidenceId
                             ? "Contraer contenido"
                             : "Consultar contenido"}
                         </button>
-                        {expandedEvidenceId === item.id ? (
+                        {expandedEvidenceId === item.evidenceId ? (
                           <pre className="evidence-content">
                             {item.content}
                           </pre>

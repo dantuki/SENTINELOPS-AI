@@ -16,7 +16,11 @@ export async function POST(
 
   return forwardProductApi(
     `/api/projects/${encodeURIComponent(projectId)}/ingestions/demo`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
     150_000,
     request,
   );
