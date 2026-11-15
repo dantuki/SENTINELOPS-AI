@@ -14,6 +14,10 @@ import type {
   EnsureProjectSourceResult,
   ProjectSourceRecord,
 } from "./source-repository.js";
+import type {
+  QaConversationRecord,
+  QaConversationRepository,
+} from "./qa-conversation-repository.js";
 
 interface QaSourceStore {
   listForProject(projectId: string): Promise<ProjectSourceRecord[] | null>;
@@ -27,10 +31,15 @@ interface QaSourceStore {
 interface QaRouteOptions {
   sourceStore?: QaSourceStore;
   fetchImpl?: typeof fetch;
+  conversationStore?: Pick<
+    QaConversationRepository,
+    "getConversation" | "createConversation" | "recordCompletedAnalysis" | "addMessage"
+  >;
 }
 
 interface GithubImportRequest {
   repositoryUrl: string;
+  conversationId?: string;
 }
 
 interface ApiError {
@@ -43,6 +52,7 @@ interface GithubQaResult {
     created: boolean;
     status: "active";
   };
+  conversation?: QaConversationRecord;
   repository: {
     url: string;
     owner: string;
@@ -76,6 +86,7 @@ const githubImportRequestSchema = {
       minLength: 1,
       maxLength: 2048,
     },
+    conversationId: { type: "string", format: "uuid" },
   },
   required: ["repositoryUrl"],
   additionalProperties: false,
@@ -179,6 +190,17 @@ export function registerQaRoutes(
           return reply.code(409).send({ error: "El origen de este repositorio está deshabilitado para el proyecto." });
         }
 
+        let conversation: QaConversationRecord | null = null;
+        if (request.body.conversationId && options.conversationStore) {
+          conversation = await options.conversationStore.getConversation(
+            request.params.projectId,
+            request.body.conversationId,
+          );
+          if (!conversation) {
+            return reply.code(404).send({ error: "Resource not found" });
+          }
+        }
+
         const imported = await importPublicGithubRepository(
           reference.canonicalUrl,
           { ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) },
@@ -216,6 +238,69 @@ export function registerQaRoutes(
           files: imported.files,
           inventory: imported.inventory,
         });
+        if (options.conversationStore && !conversation && request.authUser) {
+          try {
+            conversation = await options.conversationStore.createConversation(
+              request.params.projectId,
+              request.authUser.id,
+              `${imported.owner}/${imported.repository}`,
+            );
+            if (!conversation) {
+              return reply.code(404).send({ error: "Resource not found" });
+            }
+            await options.conversationStore.recordCompletedAnalysis({
+              projectId: request.params.projectId,
+              conversationId: conversation.id,
+              sourceId: persisted.source.id,
+              repositoryUrl: imported.canonicalUrl,
+              revision: imported.revision,
+              report: analysis,
+            });
+            await options.conversationStore.addMessage(
+              request.params.projectId,
+              conversation.id,
+              request.authUser.id,
+              "user",
+              imported.canonicalUrl,
+            );
+            await options.conversationStore.addMessage(
+              request.params.projectId,
+              conversation.id,
+              null,
+              "assistant",
+              `Análisis completado: ${analysis.findings.length} hallazgos verificables en ${imported.files.length} archivos inspeccionados.`,
+            );
+          } catch {
+            // The static report remains available while a pending additive migration is applied.
+            app.log.warn("QA conversation memory unavailable; returned non-persistent report");
+            conversation = null;
+          }
+        } else if (options.conversationStore && conversation) {
+          await options.conversationStore.recordCompletedAnalysis({
+            projectId: request.params.projectId,
+            conversationId: conversation.id,
+            sourceId: persisted.source.id,
+            repositoryUrl: imported.canonicalUrl,
+            revision: imported.revision,
+            report: analysis,
+          });
+          if (request.authUser) {
+            await options.conversationStore.addMessage(
+              request.params.projectId,
+              conversation.id,
+              request.authUser.id,
+              "user",
+              imported.canonicalUrl,
+            );
+          }
+          await options.conversationStore.addMessage(
+            request.params.projectId,
+            conversation.id,
+            null,
+            "assistant",
+            `Análisis completado: ${analysis.findings.length} hallazgos verificables en ${imported.files.length} archivos inspeccionados.`,
+          );
+        }
         const result: GithubQaResult = {
           source: { id: persisted.source.id, created: persisted.created, status: "active" },
           repository: {
@@ -228,6 +313,7 @@ export function registerQaRoutes(
             inventory: imported.inventory,
             skipped: imported.skipped,
           },
+          ...(conversation ? { conversation } : {}),
           analysis,
         };
         return reply.code(200).send({ data: result });

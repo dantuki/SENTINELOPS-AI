@@ -14,6 +14,8 @@ import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerQaRoutes } from "./qa-routes.js";
+import { QaConversationRepository } from "./qa-conversation-repository.js";
+import { registerQaConversationRoutes } from "./qa-conversation-routes.js";
 import { registerSourceRoutes } from "./source-routes.js";
 import { ProjectSourceRepository } from "./source-repository.js";
 import { PostgresRetrievalTraceStore } from "./retrieval-trace.js";
@@ -94,8 +96,13 @@ async function main(): Promise<void> {
     ? new DocumentChunkRepository(postgresPool)
     : undefined;
 
+  const qaConversationRepository = postgresPool
+    ? new QaConversationRepository(postgresPool)
+    : undefined;
+
   registerProductRoutes(app, productRepository);
-  registerQaRoutes(app, { sourceStore: sourceRepository });
+  registerQaRoutes(app, { sourceStore: sourceRepository, conversationStore: qaConversationRepository });
+  registerQaConversationRoutes(app, qaConversationRepository);
   registerSourceRoutes(app, sourceRepository);
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);

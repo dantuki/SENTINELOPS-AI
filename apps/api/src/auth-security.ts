@@ -122,6 +122,26 @@ const policies = new Map<string, RoutePolicy>([
     "POST /api/projects/:projectId/qa/github",
     { permission: "project.manage" },
   ],
+  [
+    "GET /api/projects/:projectId/qa/conversations",
+    { permission: "project.read" },
+  ],
+  [
+    "POST /api/projects/:projectId/qa/conversations",
+    { permission: "project.investigate" },
+  ],
+  [
+    "GET /api/projects/:projectId/qa/conversations/:conversationId",
+    { permission: "project.read" },
+  ],
+  [
+    "PATCH /api/projects/:projectId/qa/conversations/:conversationId",
+    { permission: "project.investigate" },
+  ],
+  [
+    "POST /api/projects/:projectId/qa/conversations/:conversationId/messages",
+    { permission: "project.investigate" },
+  ],
   ["POST /api/chat", { permission: "chat.use" }],
   ["POST /api/admin/users", { permission: "instance.admin" }],
   [

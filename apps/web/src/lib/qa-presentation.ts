@@ -62,6 +62,7 @@ export interface QaImportResult {
     created: boolean;
     status: "active";
   };
+  conversation?: QaConversation;
   repository: {
     url: string;
     owner: string;
@@ -78,6 +79,26 @@ export interface QaImportResult {
     };
   };
   analysis: QaAnalysisReport;
+}
+
+export interface QaConversation {
+  id: string;
+  projectId: string;
+  title: string;
+  isPinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string;
+}
+
+export interface QaConversationMessage {
+  id: string;
+  conversationId: string;
+  projectId: string;
+  authorUserId: string | null;
+  role: "user" | "assistant" | "system";
+  body: string;
+  createdAt: string;
 }
 
 const findingCategories = ["configuration", "quality", "security", "testing"] as const;
@@ -142,6 +163,17 @@ function isInventory(value: unknown): value is QaInventory {
   );
 }
 
+function isConversation(value: unknown): value is QaConversation {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.projectId === "string" &&
+    typeof value.title === "string" &&
+    typeof value.isPinned === "boolean" &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string" &&
+    typeof value.lastMessageAt === "string";
+}
+
 export function isQaImportResult(value: unknown): value is QaImportResult {
   if (!isRecord(value) || !isRecord(value.source) || !isRecord(value.repository) || !isRecord(value.analysis)) {
     return false;
@@ -151,6 +183,7 @@ export function isQaImportResult(value: unknown): value is QaImportResult {
     typeof source.id === "string" &&
     typeof source.created === "boolean" &&
     source.status === "active" &&
+    (!("conversation" in value) || isConversation(value.conversation)) &&
     typeof repository.url === "string" &&
     typeof repository.owner === "string" &&
     typeof repository.name === "string" &&

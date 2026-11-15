@@ -13,6 +13,10 @@ import {
 } from "../src/github-repository-import.js";
 import { buildApp } from "../src/app.js";
 import { registerQaRoutes } from "../src/qa-routes.js";
+import {
+  registerQaConversationRoutes,
+  type QaConversationMemoryStore,
+} from "../src/qa-conversation-routes.js";
 import type {
   CreateProjectSourceInput,
   EnsureProjectSourceResult,
@@ -435,6 +439,64 @@ test("disabled GitHub sources cannot be reimported and do not trigger an externa
     });
     assert.equal(response.statusCode, 409);
     assert.equal(fetched, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("QA conversation memory routes retain project scope, pins, and message roles", async () => {
+  const security = createTestSecurity();
+  const app = buildApp({
+    logger: false,
+    securityStore: security.securityStore,
+    securityConfig: security.securityConfig,
+  });
+  app.addHook("onRequest", async (request) => security.addTestCredentials(request));
+  const conversation = {
+    id: "33333333-3333-4333-8333-333333333333",
+    projectId,
+    title: "acme/demo",
+    isPinned: false,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    lastMessageAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const messages: Array<{
+    id: string; conversationId: string; projectId: string; authorUserId: string | null;
+    role: "user" | "assistant" | "system"; body: string; createdAt: Date;
+  }> = [];
+  const store: QaConversationMemoryStore = {
+    listConversations: async (id) => id === projectId ? [conversation] : [],
+    createConversation: async () => conversation,
+    getConversation: async (id, id2) => id === projectId && id2 === conversation.id ? conversation : null,
+    setPinned: async (_id, _conversationId, isPinned) => ({ ...conversation, isPinned }),
+    listMessages: async () => messages,
+    addMessage: async (_projectId, conversationId, authorUserId, role, body) => {
+      const message = { id: `message-${messages.length + 1}`, conversationId, projectId, authorUserId, role, body, createdAt: new Date() };
+      messages.push(message);
+      return message;
+    },
+  };
+  registerQaConversationRoutes(app, store);
+  try {
+    const listed = await app.inject({ method: "GET", url: `/api/projects/${projectId}/qa/conversations` });
+    assert.equal(listed.statusCode, 200);
+    assert.equal((listed.json() as { data: unknown[] }).data.length, 1);
+    const pin = await app.inject({
+      method: "PATCH", url: `/api/projects/${projectId}/qa/conversations/${conversation.id}`,
+      payload: { isPinned: true },
+    });
+    assert.equal(pin.statusCode, 200);
+    assert.equal((pin.json() as { data: { isPinned: boolean } }).data.isPinned, true);
+    const message = await app.inject({
+      method: "POST", url: `/api/projects/${projectId}/qa/conversations/${conversation.id}/messages`,
+      payload: { role: "user", body: "¿Qué encontraste?" },
+    });
+    assert.equal(message.statusCode, 201);
+    assert.equal(messages[0]?.authorUserId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const detail = await app.inject({ method: "GET", url: `/api/projects/${projectId}/qa/conversations/${conversation.id}` });
+    assert.equal(detail.statusCode, 200);
+    assert.equal((detail.json() as { data: { messages: unknown[] } }).data.messages.length, 1);
   } finally {
     await app.close();
   }

@@ -45,6 +45,18 @@ const retrievalTraceIndexes = [
   "idx_retrieval_events_run_project",
   "idx_retrieval_event_items_request",
 ];
+const qaMemoryTables = [
+  "qa_conversations",
+  "qa_conversation_messages",
+  "qa_analysis_runs",
+  "qa_analysis_findings",
+];
+const qaMemoryIndexes = [
+  "idx_qa_conversations_project_activity",
+  "idx_qa_messages_conversation_created",
+  "idx_qa_runs_conversation_completed",
+  "idx_qa_findings_run_importance",
+];
 const retrievalTraceConstraints = [
   "uq_documents_id_project_source",
   "pk_retrieval_events",
@@ -279,6 +291,42 @@ async function detectMigrationState(
     }
     return signature?.tables === 0 && signature.indexes === 0 &&
       signature.constraints === 0 && signature.columns === 0
+      ? "pending"
+      : "partial";
+  }
+
+  if (migration.version === "009") {
+    const result = await client.query<{
+      tables: number;
+      indexes: number;
+      trigger: boolean;
+    }>(`
+      SELECT
+        (
+          SELECT count(*)::integer
+          FROM unnest($1::text[]) AS expected(name)
+          WHERE to_regclass('public.' || expected.name) IS NOT NULL
+        ) AS tables,
+        (
+          SELECT count(*)::integer
+          FROM unnest($2::text[]) AS expected(name)
+          WHERE to_regclass('public.' || expected.name) IS NOT NULL
+        ) AS indexes,
+        EXISTS (
+          SELECT 1 FROM pg_trigger
+          WHERE tgname = 'trg_qa_conversations_updated_at'
+            AND tgrelid = to_regclass('public.qa_conversations')
+        ) AS trigger
+    `, [qaMemoryTables, qaMemoryIndexes]);
+    const signature = result.rows[0];
+    if (
+      signature?.tables === qaMemoryTables.length &&
+      signature.indexes === qaMemoryIndexes.length &&
+      signature.trigger
+    ) {
+      return "applied";
+    }
+    return signature?.tables === 0 && signature.indexes === 0 && !signature.trigger
       ? "pending"
       : "partial";
   }

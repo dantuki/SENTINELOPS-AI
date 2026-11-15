@@ -4,6 +4,8 @@ import {
   answerQaQuestion,
   importanceLabel,
   isQaImportResult,
+  type QaConversation,
+  type QaConversationMessage,
   type QaFinding,
   type QaImportResult,
 } from "@/lib/qa-presentation";
@@ -32,6 +34,24 @@ interface ChatMessage {
   id: string;
   role: "assistant" | "user";
   text: string;
+}
+
+function isConversation(value: unknown): value is QaConversation {
+  return typeof value === "object" && value !== null &&
+    "id" in value && typeof value.id === "string" &&
+    "projectId" in value && typeof value.projectId === "string" &&
+    "title" in value && typeof value.title === "string" &&
+    "isPinned" in value && typeof value.isPinned === "boolean" &&
+    "createdAt" in value && typeof value.createdAt === "string" &&
+    "updatedAt" in value && typeof value.updatedAt === "string" &&
+    "lastMessageAt" in value && typeof value.lastMessageAt === "string";
+}
+
+function isConversationMessage(value: unknown): value is QaConversationMessage {
+  return typeof value === "object" && value !== null &&
+    "id" in value && typeof value.id === "string" &&
+    "role" in value && ["user", "assistant", "system"].includes(String(value.role)) &&
+    "body" in value && typeof value.body === "string";
 }
 
 function isWorkspace(value: unknown): value is Workspace {
@@ -209,6 +229,9 @@ export function QaWorkspace() {
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const [analysisResult, setAnalysisResult] = useState<QaImportResult | null>(null);
+  const [conversations, setConversations] = useState<QaConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState("");
+  const [historyError, setHistoryError] = useState("");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -276,10 +299,37 @@ export function QaWorkspace() {
 
   useEffect(() => () => importController.current?.abort(), []);
 
+  async function loadConversations(nextProjectId = projectId) {
+    if (!nextProjectId) {
+      setConversations([]);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(nextProjectId)}/qa/conversations`, { cache: "no-store" });
+      const payload: unknown = await response.json();
+      const data = response.ok && payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data)
+        ? payload.data.filter(isConversation)
+        : null;
+      if (!data) throw new Error("history unavailable");
+      setConversations(data);
+      setHistoryError("");
+    } catch {
+      setConversations([]);
+      setHistoryError("El historial persistente estará disponible cuando la memoria de QA esté configurada.");
+    }
+  }
+
+  useEffect(() => {
+    void loadConversations();
+  // The project is the only external input for the history fetch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   function selectProject(nextProjectId: string) {
     importController.current?.abort();
     setProjectId(nextProjectId);
     setAnalysisResult(null);
+    setActiveConversationId("");
     setImportError("");
     setMessages([
       {
@@ -290,10 +340,55 @@ export function QaWorkspace() {
     ]);
   }
 
+  function startNewAnalysis() {
+    importController.current?.abort();
+    setActiveConversationId("");
+    setAnalysisResult(null);
+    setImportError("");
+    setMessages([{ id: `new-${Date.now()}`, role: "assistant", text: "Nuevo análisis. Conecta un repositorio público de GitHub para crear un informe verificable." }]);
+  }
+
+  async function openConversation(conversation: QaConversation) {
+    if (!projectId || conversation.id === activeConversationId) return;
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(conversation.id)}`, { cache: "no-store" });
+      const payload: unknown = await response.json();
+      const data = response.ok && payload && typeof payload === "object" && "data" in payload && typeof payload.data === "object" && payload.data !== null
+        ? payload.data as { messages?: unknown }
+        : null;
+      if (!data || !Array.isArray(data.messages) || !data.messages.every(isConversationMessage)) throw new Error("invalid history");
+      setActiveConversationId(conversation.id);
+      setAnalysisResult(null);
+      setMessages(data.messages.map((message) => ({
+        id: message.id,
+        role: message.role === "user" ? "user" : "assistant",
+        text: message.body,
+      })));
+      setHistoryError("");
+    } catch {
+      setHistoryError("No se pudo abrir esta conversación. Verifica que sigues teniendo acceso al proyecto.");
+    }
+  }
+
+  async function togglePinned(conversation: QaConversation) {
+    if (!projectId) return;
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(conversation.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isPinned: !conversation.isPinned }),
+      });
+      if (!response.ok) throw new Error("pin failed");
+      await loadConversations();
+    } catch {
+      setHistoryError("No se pudo actualizar el fijado de la conversación.");
+    }
+  }
+
   async function importRepository(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!projectId || isImporting) return;
-    const payload = { repositoryUrl: repositoryUrl.trim() };
+    const payload = { repositoryUrl: repositoryUrl.trim(), ...(activeConversationId ? { conversationId: activeConversationId } : {}) };
     if (!isGithubQaRequest(payload)) {
       setImportError("Introduce una URL de repositorio público de GitHub.");
       return;
@@ -318,6 +413,10 @@ export function QaWorkspace() {
       const result = responsePayload.data;
       if (!isQaImportResult(result)) throw new Error(String(response.status));
       setAnalysisResult(result);
+      if (result.conversation) {
+        setActiveConversationId(result.conversation.id);
+        await loadConversations();
+      }
       setMessages((current) => [...current, {
         id: `report-${result.analysis.analysisId}`,
         role: "assistant",
@@ -349,6 +448,16 @@ export function QaWorkspace() {
         text: answerQaQuestion(trimmed, analysisResult.analysis),
       },
     ]);
+    if (activeConversationId && projectId) {
+      void Promise.all([
+        fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "user", body: trimmed }),
+        }),
+        fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "assistant", body: answerQaQuestion(trimmed, analysisResult.analysis) }),
+        }),
+      ]).then(() => loadConversations()).catch(() => setHistoryError("La respuesta se mostró en esta sesión, pero no se pudo guardar en el historial."));
+    }
     setQuestion("");
   }
 
@@ -360,7 +469,7 @@ export function QaWorkspace() {
           <span className="qa-brand-name">SentinelOps <small>QA</small></span>
         </a>
         <nav className="qa-nav">
-          <a className="qa-nav-active" href="/qa">Asistente de QA</a>
+          <button className="qa-nav-active" type="button" onClick={startNewAnalysis}>Nuevo análisis</button>
           <a href="/knowledge-base">Fuentes técnicas</a>
           <a href="/investigation">Investigación avanzada</a>
         </nav>
@@ -379,14 +488,34 @@ export function QaWorkspace() {
           {selectedProject?.description ? <p>{selectedProject.description}</p> : null}
           {selectionError ? <p className="qa-context-error" role="alert">{selectionError}</p> : null}
         </section>
+        <section className="qa-history" aria-label="Conversaciones del proyecto">
+          <div className="qa-history-heading">
+            <p className="qa-kicker">CONVERSACIONES</p>
+            <span>{conversations.length}</span>
+          </div>
+          {conversations.length > 0 ? (
+            <ul>
+              {conversations.map((conversation) => (
+                <li key={conversation.id}>
+                  <button className={conversation.id === activeConversationId ? "qa-history-active" : ""} type="button" onClick={() => void openConversation(conversation)}>
+                    <span>{conversation.isPinned ? "★ " : ""}{conversation.title}</span>
+                    <small>{new Date(conversation.lastMessageAt).toLocaleDateString("es-CO")}</small>
+                  </button>
+                  <button className="qa-pin-button" type="button" onClick={() => void togglePinned(conversation)} aria-label={conversation.isPinned ? "Quitar fijado" : "Fijar conversación"}>{conversation.isPinned ? "★" : "☆"}</button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="qa-sidebar-note">Aún no hay conversaciones guardadas para este proyecto.</p>}
+          {historyError ? <p className="qa-context-error" role="status">{historyError}</p> : null}
+        </section>
         <p className="qa-sidebar-note">MVP: repositorios públicos de GitHub y análisis estático. Las cargas ZIP y la ejecución aislada de pruebas aún no están disponibles.</p>
       </aside>
 
       <section className="qa-main" aria-labelledby="qa-title">
         <header className="qa-topbar">
           <div>
-            <p className="qa-kicker">ASISTENTE DE CALIDAD · EVIDENCIA PRIMERO</p>
-            <h1 id="qa-title">Entiende la calidad de tu proyecto sin ejecutar código no confiable.</h1>
+            <p className="qa-kicker">{activeConversationId ? "CONVERSACIÓN DE PROYECTO" : "NUEVO ANÁLISIS"} · EVIDENCIA PRIMERO</p>
+            <h1 id="qa-title">{analysisResult ? `Encontré ${analysisResult.analysis.findings.length} hallazgos verificables.` : "Entiende la calidad de tu proyecto sin ejecutar código no confiable."}</h1>
           </div>
           <span className="qa-readonly">Análisis estático · solo lectura</span>
         </header>

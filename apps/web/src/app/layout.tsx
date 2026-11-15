@@ -11,6 +11,13 @@ export const metadata: Metadata = {
   },
   description:
     "Asistente de calidad de software basado en evidencia verificable, con investigación avanzada disponible para incidentes.",
+  applicationName: "SentinelOps AI",
+  openGraph: {
+    title: "SentinelOps AI",
+    description: "Asistente de ingeniería de software basado en evidencia verificable.",
+    type: "website",
+  },
+  icons: { icon: "/icon.svg" },
 };
 
 export default function RootLayout({

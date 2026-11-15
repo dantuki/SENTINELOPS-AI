@@ -85,7 +85,12 @@ function reportFixture(): QaImportResult {
 
 test("the QA import request has a closed payload shape", () => {
   assert.equal(isGithubQaRequest({ repositoryUrl: "https://github.com/acme/demo" }), true);
+  assert.equal(isGithubQaRequest({
+    repositoryUrl: "https://github.com/acme/demo",
+    conversationId: "33333333-3333-4333-8333-333333333333",
+  }), true);
   assert.equal(isGithubQaRequest({ repositoryUrl: "https://github.com/acme/demo", branch: "main" }), false);
+  assert.equal(isGithubQaRequest({ repositoryUrl: "https://github.com/acme/demo", conversationId: "//other-project" }), false);
   assert.equal(isGithubQaRequest({ repositoryUrl: "" }), false);
 });
 
@@ -94,6 +99,7 @@ test("the QA presentation contract preserves source evidence and rejects malform
   assert.equal(isQaImportResult(fixture), true);
   assert.equal(isQaImportResult({ ...fixture, source: { ...fixture.source, status: "pending" } }), false);
   assert.equal(isQaImportResult({ ...fixture, repository: { ...fixture.repository, skipped: {} } }), false);
+  assert.equal(isQaImportResult({ ...fixture, conversation: { id: "x" } }), false);
   assert.equal(isQaImportResult({ ...fixture, analysis: { ...fixture.analysis, inventory: { ...fixture.analysis.inventory, testFiles: {} as unknown as { discovered: number; selected: number } } } }), false);
 });
 
