@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   analyzeQaProject,
+  type QaRepositoryInventory,
   type QaSourceFile,
 } from "../src/qa-analysis.js";
 import {
@@ -27,6 +28,24 @@ function file(path: string, content: string): QaSourceFile {
     content,
     contentSha256: "a".repeat(64),
     byteLength: Buffer.byteLength(content, "utf8"),
+  };
+}
+
+function inventory(overrides: Partial<QaRepositoryInventory> = {}): QaRepositoryInventory {
+  return {
+    selectionStrategy: "category_priority_v1",
+    discoveredFiles: 2,
+    selectedFiles: 2,
+    categories: [
+      { category: "manifest", discovered: 1, selected: 1 },
+      { category: "test_configuration", discovered: 0, selected: 0 },
+      { category: "source", discovered: 1, selected: 1 },
+      { category: "test", discovered: 0, selected: 0 },
+      { category: "documentation", discovered: 0, selected: 0 },
+      { category: "other", discovered: 0, selected: 0 },
+    ],
+    testFiles: { discovered: 0, selected: 0 },
+    ...overrides,
   };
 }
 
@@ -111,16 +130,107 @@ test("public GitHub import uses bounded API content, ignores unsafe paths, and d
   });
 
   assert.equal(imported.revision, "revision-123");
-  assert.deepEqual(imported.files.map((item) => item.path), ["README.md", "package.json", "src/index.ts"]);
+  assert.deepEqual(imported.files.map((item) => item.path), ["package.json", "src/index.ts", "README.md"]);
   assert.equal(imported.skipped.invalidPath, 1);
   assert.equal(imported.skipped.unsupported, 1);
   assert.match(imported.files.find((item) => item.path === "src/index.ts")?.content ?? "", /export const add/u);
+  assert.equal(imported.inventory.testFiles.discovered, 0);
+});
+
+test("GitHub QA inventories test paths outside the bounded sample and selects representative categories deterministically", async () => {
+  const contents: Record<string, string> = {
+    "package.json": JSON.stringify({ scripts: { test: "node --test" } }),
+    "src/entry.ts": "export const entry = true;\n",
+    "test/app.js": "test('app', () => {});\n",
+    "tests/integration.spec.ts": "export {};\n",
+    "README.md": "# Demo\n",
+    "scripts/check.js": "console.log('check');\n",
+  };
+  const imported = await importPublicGithubRepository("https://github.com/acme/demo", {
+    fetchImpl: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/acme/demo") return Response.json({ private: false, default_branch: "main" });
+      if (url.pathname === "/repos/acme/demo/git/trees/main") {
+        return Response.json({
+          sha: "revision-coverage",
+          truncated: false,
+          tree: [
+            ...Object.keys(contents).map((path) => ({ path, type: "blob", size: Buffer.byteLength(contents[path] ?? "", "utf8") })),
+            { path: "tests/fixture.bin", type: "blob", size: 5 },
+          ],
+        });
+      }
+      const path = decodeURIComponent(url.pathname.replace("/repos/acme/demo/contents/", ""));
+      const content = contents[path];
+      return content === undefined
+        ? new Response("not found", { status: 404 })
+        : Response.json({ encoding: "base64", content: Buffer.from(content).toString("base64") });
+    },
+  });
+
+  assert.deepEqual(imported.files.map((item) => item.path), [
+    "package.json", "test/app.js", "tests/integration.spec.ts", "src/entry.ts", "README.md",
+  ]);
+  assert.deepEqual(imported.inventory.testFiles, { discovered: 3, selected: 2 });
+  assert.deepEqual(imported.inventory.categories.find((item) => item.category === "test"), {
+    category: "test", discovered: 3, selected: 2,
+  });
+});
+
+test("GitHub tree order does not change the selected sample or revision identity", async () => {
+  const contents: Record<string, string> = {
+    "package.json": "{\"scripts\":{}}\n",
+    "src/z.ts": "export const z = 1;\n",
+    "src/a.ts": "export const a = 1;\n",
+    "tests/app.spec.ts": "export {};\n",
+    "README.md": "# Demo\n",
+  };
+  const importWithTreeOrder = async (paths: string[]) => importPublicGithubRepository("https://github.com/acme/demo", {
+    fetchImpl: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/acme/demo") return Response.json({ private: false, default_branch: "main" });
+      if (url.pathname === "/repos/acme/demo/git/trees/main") {
+        return Response.json({
+          sha: "revision-stable",
+          truncated: false,
+          tree: paths.map((path) => ({ path, type: "blob", size: Buffer.byteLength(contents[path] ?? "", "utf8") })),
+        });
+      }
+      const path = decodeURIComponent(url.pathname.replace("/repos/acme/demo/contents/", ""));
+      return Response.json({ encoding: "base64", content: Buffer.from(contents[path] ?? "").toString("base64") });
+    },
+  });
+  const forward = await importWithTreeOrder(Object.keys(contents));
+  const reversed = await importWithTreeOrder(Object.keys(contents).reverse());
+  assert.equal(forward.revision, reversed.revision);
+  assert.deepEqual(forward.files.map((item) => item.path), reversed.files.map((item) => item.path));
+  assert.deepEqual(forward.inventory, reversed.inventory);
+});
+
+test("GitHub import preserves repository and transport failure boundaries", async () => {
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/repos/acme/demo") return Response.json({ private: false, default_branch: "main" });
+        return Response.json({ sha: "revision-limited", truncated: true, tree: [] });
+      },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "repository_limit_exceeded",
+  );
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => { throw new Error("network unavailable"); },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "github_unavailable",
+  );
 });
 
 test("static QA findings retain precise evidence and redact private material", () => {
   const report = analyzeQaProject({
     repositoryUrl: "https://github.com/acme/demo",
     revision: "revision-123",
+    inventory: inventory(),
     files: [
       file("package.json", JSON.stringify({ scripts: {} }, null, 2)),
       file("src/runtime.ts", [
@@ -138,7 +248,69 @@ test("static QA findings retain precise evidence and redact private material", (
   assert.match(key?.evidence.excerpt ?? "", /redactado/u);
   assert.equal(key?.evidence.excerpt.includes("PRIVATE KEY-----';"), false);
   assert.ok(report.findings.some((item) => item.ruleId === "qa.security.dynamic_eval"));
+  assert.equal(report.findings.some((item) => item.ruleId === "qa.testing.no_discovered_test_files"), false);
   assert.doesNotMatch(JSON.stringify(report), /global quality score|ejecutó pruebas/iu);
+});
+
+test("static QA never turns an incomplete sample into a claim that tests are absent", () => {
+  const report = analyzeQaProject({
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "revision-tests-outside-sample",
+    files: [file("package.json", JSON.stringify({ scripts: {} }))],
+    inventory: inventory({
+      discoveredFiles: 42,
+      selectedFiles: 1,
+      categories: [
+        { category: "manifest", discovered: 1, selected: 1 },
+        { category: "test_configuration", discovered: 1, selected: 0 },
+        { category: "source", discovered: 30, selected: 0 },
+        { category: "test", discovered: 10, selected: 0 },
+        { category: "documentation", discovered: 0, selected: 0 },
+        { category: "other", discovered: 0, selected: 0 },
+      ],
+      testFiles: { discovered: 10, selected: 0 },
+    }),
+  });
+  assert.ok(report.findings.some((item) => item.ruleId === "qa.testing.missing_test_script"));
+  assert.equal(report.findings.some((item) => item.ruleId === "qa.testing.no_discovered_test_files"), false);
+  assert.deepEqual(report.inventory.testFiles, { discovered: 10, selected: 0 });
+});
+
+test("test declaration, inventory detection, and execution remain distinct when test bodies are omitted", () => {
+  const report = analyzeQaProject({
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "revision-declared-tests",
+    files: [file("package.json", JSON.stringify({ scripts: { test: "node --test" } }))],
+    inventory: inventory({
+      discoveredFiles: 12,
+      selectedFiles: 1,
+      testFiles: { discovered: 8, selected: 0 },
+    }),
+  });
+  assert.equal(report.findings.some((item) => item.ruleId === "qa.testing.missing_test_script"), false);
+  assert.deepEqual(report.inventory.testFiles, { discovered: 8, selected: 0 });
+  assert.equal(report.testExecution.status, "not_executed");
+});
+
+test("a missing manifest leaves test declaration unknown rather than creating a negative finding", () => {
+  const report = analyzeQaProject({
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "revision-no-manifest",
+    files: [file("src/app.ts", "export const app = true;\n")],
+    inventory: inventory({
+      discoveredFiles: 1,
+      selectedFiles: 1,
+      categories: [
+        { category: "manifest", discovered: 0, selected: 0 },
+        { category: "test_configuration", discovered: 0, selected: 0 },
+        { category: "source", discovered: 1, selected: 1 },
+        { category: "test", discovered: 0, selected: 0 },
+        { category: "documentation", discovered: 0, selected: 0 },
+        { category: "other", discovered: 0, selected: 0 },
+      ],
+    }),
+  });
+  assert.equal(report.findings.some((item) => item.category === "testing"), false);
 });
 
 test("GitHub QA rejects missing Origin and session before any external fetch", async () => {

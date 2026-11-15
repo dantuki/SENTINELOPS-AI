@@ -50,6 +50,7 @@ interface GithubQaResult {
     defaultBranch: string;
     revision: string;
     inspectedFileCount: number;
+    inventory: QaAnalysisReport["inventory"];
     skipped: {
       unsupported: number;
       tooLarge: number;
@@ -213,6 +214,7 @@ export function registerQaRoutes(
           repositoryUrl: imported.canonicalUrl,
           revision: imported.revision,
           files: imported.files,
+          inventory: imported.inventory,
         });
         const result: GithubQaResult = {
           source: { id: persisted.source.id, created: persisted.created, status: "active" },
@@ -223,6 +225,7 @@ export function registerQaRoutes(
             defaultBranch: imported.defaultBranch,
             revision: imported.revision,
             inspectedFileCount: imported.files.length,
+            inventory: imported.inventory,
             skipped: imported.skipped,
           },
           analysis,

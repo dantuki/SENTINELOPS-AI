@@ -18,6 +18,20 @@ function reportFixture(): QaImportResult {
       defaultBranch: "main",
       revision: "abc123",
       inspectedFileCount: 2,
+      inventory: {
+        selectionStrategy: "category_priority_v1",
+        discoveredFiles: 3,
+        selectedFiles: 2,
+        categories: [
+          { category: "manifest", discovered: 1, selected: 1 },
+          { category: "test_configuration", discovered: 0, selected: 0 },
+          { category: "source", discovered: 1, selected: 1 },
+          { category: "test", discovered: 1, selected: 0 },
+          { category: "documentation", discovered: 0, selected: 0 },
+          { category: "other", discovered: 0, selected: 0 },
+        ],
+        testFiles: { discovered: 1, selected: 0 },
+      },
       skipped: { unsupported: 1, tooLarge: 0, invalidPath: 0, limitReached: 0 },
     },
     analysis: {
@@ -26,6 +40,20 @@ function reportFixture(): QaImportResult {
       repositoryUrl: "https://github.com/acme/demo",
       revision: "abc123",
       detectedStack: ["TypeScript"],
+      inventory: {
+        selectionStrategy: "category_priority_v1",
+        discoveredFiles: 3,
+        selectedFiles: 2,
+        categories: [
+          { category: "manifest", discovered: 1, selected: 1 },
+          { category: "test_configuration", discovered: 0, selected: 0 },
+          { category: "source", discovered: 1, selected: 1 },
+          { category: "test", discovered: 1, selected: 0 },
+          { category: "documentation", discovered: 0, selected: 0 },
+          { category: "other", discovered: 0, selected: 0 },
+        ],
+        testFiles: { discovered: 1, selected: 0 },
+      },
       inspectedFiles: [{ path: "src/index.ts", contentSha256: "a".repeat(64), byteLength: 80 }],
       checksPerformed: ["Revisión estática de material de clave privada."],
       findings: [
@@ -66,6 +94,7 @@ test("the QA presentation contract preserves source evidence and rejects malform
   assert.equal(isQaImportResult(fixture), true);
   assert.equal(isQaImportResult({ ...fixture, source: { ...fixture.source, status: "pending" } }), false);
   assert.equal(isQaImportResult({ ...fixture, repository: { ...fixture.repository, skipped: {} } }), false);
+  assert.equal(isQaImportResult({ ...fixture, analysis: { ...fixture.analysis, inventory: { ...fixture.analysis.inventory, testFiles: {} as unknown as { discovered: number; selected: number } } } }), false);
 });
 
 test("the local report conversation preserves test-execution limits and evidence locations", () => {

@@ -26,6 +26,7 @@ export interface QaAnalysisReport {
   repositoryUrl: string;
   revision: string;
   detectedStack: string[];
+  inventory: QaInventory;
   inspectedFiles: Array<{
     path: string;
     contentSha256: string;
@@ -37,6 +38,21 @@ export interface QaAnalysisReport {
   testExecution: {
     status: "not_executed";
     reason: string;
+  };
+}
+
+export interface QaInventory {
+  selectionStrategy: "category_priority_v1";
+  discoveredFiles: number;
+  selectedFiles: number;
+  categories: Array<{
+    category: "manifest" | "test_configuration" | "source" | "test" | "documentation" | "other";
+    discovered: number;
+    selected: number;
+  }>;
+  testFiles: {
+    discovered: number;
+    selected: number;
   };
 }
 
@@ -53,6 +69,7 @@ export interface QaImportResult {
     defaultBranch: string;
     revision: string;
     inspectedFileCount: number;
+    inventory: QaInventory;
     skipped: {
       unsupported: number;
       tooLarge: number;
@@ -103,6 +120,28 @@ function isSkippedInventory(value: unknown): value is QaImportResult["repository
   );
 }
 
+const inventoryCategories = ["manifest", "test_configuration", "source", "test", "documentation", "other"] as const;
+
+function isInventory(value: unknown): value is QaInventory {
+  return (
+    isRecord(value) &&
+    value.selectionStrategy === "category_priority_v1" &&
+    typeof value.discoveredFiles === "number" &&
+    typeof value.selectedFiles === "number" &&
+    Array.isArray(value.categories) &&
+    value.categories.length === inventoryCategories.length &&
+    value.categories.every((item) =>
+      isRecord(item) &&
+      inventoryCategories.includes(item.category as typeof inventoryCategories[number]) &&
+      typeof item.discovered === "number" &&
+      typeof item.selected === "number",
+    ) &&
+    isRecord(value.testFiles) &&
+    typeof value.testFiles.discovered === "number" &&
+    typeof value.testFiles.selected === "number"
+  );
+}
+
 export function isQaImportResult(value: unknown): value is QaImportResult {
   if (!isRecord(value) || !isRecord(value.source) || !isRecord(value.repository) || !isRecord(value.analysis)) {
     return false;
@@ -118,12 +157,14 @@ export function isQaImportResult(value: unknown): value is QaImportResult {
     typeof repository.defaultBranch === "string" &&
     typeof repository.revision === "string" &&
     typeof repository.inspectedFileCount === "number" &&
+    isInventory(repository.inventory) &&
     isSkippedInventory(repository.skipped) &&
     typeof analysis.analysisId === "string" &&
     typeof analysis.rulesetVersion === "string" &&
     typeof analysis.repositoryUrl === "string" &&
     typeof analysis.revision === "string" &&
     isStringArray(analysis.detectedStack) &&
+    isInventory(analysis.inventory) &&
     Array.isArray(analysis.inspectedFiles) &&
     analysis.inspectedFiles.every((file) =>
       isRecord(file) &&

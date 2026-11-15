@@ -10,6 +10,32 @@ export type QaFindingCategory =
 
 export type QaFindingImportance = "info" | "warning" | "high";
 
+export type QaInventoryCategory =
+  | "manifest"
+  | "test_configuration"
+  | "source"
+  | "test"
+  | "documentation"
+  | "other";
+
+export interface QaInventoryCategoryCount {
+  category: QaInventoryCategory;
+  discovered: number;
+  selected: number;
+}
+
+/** Metadata from the repository tree. It never contains downloaded file bodies. */
+export interface QaRepositoryInventory {
+  selectionStrategy: "category_priority_v1";
+  discoveredFiles: number;
+  selectedFiles: number;
+  categories: QaInventoryCategoryCount[];
+  testFiles: {
+    discovered: number;
+    selected: number;
+  };
+}
+
 export interface QaSourceFile {
   path: string;
   content: string;
@@ -43,6 +69,7 @@ export interface QaAnalysisInput {
   repositoryUrl: string;
   revision: string;
   files: QaSourceFile[];
+  inventory: QaRepositoryInventory;
 }
 
 export interface QaAnalysisReport {
@@ -51,6 +78,7 @@ export interface QaAnalysisReport {
   repositoryUrl: string;
   revision: string;
   detectedStack: string[];
+  inventory: QaRepositoryInventory;
   inspectedFiles: Array<Pick<QaSourceFile, "path" | "contentSha256" | "byteLength">>;
   checksPerformed: string[];
   findings: QaFinding[];
@@ -65,8 +93,6 @@ const PRIVATE_KEY_MARKER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/u;
 const EVAL_CALL = /\beval\s*\(/u;
 const SENSITIVE_ASSIGNMENT = /\b(?:api[_-]?key|password|secret|token)\b\s*[:=]\s*(["'`])[^"'`\r\n]+\1/giu;
 const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/gu;
-const TEST_FILE = /(?:^|\/)(?:[^/]+\.)?(?:test|spec)\.(?:[cm]?[jt]sx?|py)$/iu;
-
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -157,7 +183,7 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
   const files = [...input.files].sort((left, right) => comparePaths(left.path, right.path));
   const findings: QaFinding[] = [];
   const checksPerformed = [
-    "Inventario de archivos de texto soportados",
+    "Inventario de metadatos y selección acotada por categorías",
     "Detección de stack mediante manifiestos y extensiones",
     "Configuración declarada de pruebas y lint",
     "Patrones estáticos de claves privadas y ejecución dinámica",
@@ -205,23 +231,6 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
     }
   }
 
-  const nodeProject = packageFile !== undefined || files.some((file) => /\.[cm]?[jt]sx?$/u.test(file.path));
-  if (nodeProject && !files.some((file) => TEST_FILE.test(file.path))) {
-    const evidence = packageFile ?? files[0];
-    if (evidence) {
-      findings.push(finding({
-        ruleId: "qa.testing.no_discovered_test_files",
-        category: "testing",
-        importance: "info",
-        title: "No se encontraron archivos de prueba en el inventario analizado",
-        description: "No se detectaron nombres de archivo con las convenciones .test o .spec dentro de los archivos inspeccionados.",
-        whyItMatters: "Esta comprobación está limitada al inventario soportado; no demuestra que el proyecto no tenga pruebas en otra herramienta o ruta omitida.",
-        recommendation: "Revisa la ubicación y la convención de las pruebas, y decláralas mediante un script de pruebas cuando corresponda.",
-        evidence: evidenceFor(evidence, 1),
-      }));
-    }
-  }
-
   for (const file of files) {
     const keyLine = lineFor(file.content, PRIVATE_KEY_MARKER);
     if (keyLine !== null) {
@@ -265,6 +274,7 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
     repositoryUrl: input.repositoryUrl,
     revision: input.revision,
     detectedStack: detectStack(files),
+    inventory: input.inventory,
     inspectedFiles: files.map(({ path, contentSha256, byteLength }) => ({
       path,
       contentSha256,
@@ -274,6 +284,7 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
     findings,
     limitations: [
       "El análisis inspecciona únicamente archivos de texto soportados y no ejecuta instalaciones, builds, linters ni pruebas del repositorio.",
+      "El inventario de rutas puede detectar pruebas fuera de la muestra descargada; una ausencia en la muestra no permite afirmar que el repositorio no tenga pruebas.",
       "La ausencia de un hallazgo en estas reglas no demuestra que el proyecto esté libre de defectos o vulnerabilidades.",
     ],
     testExecution: {

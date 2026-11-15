@@ -114,6 +114,11 @@ function FindingCard({ finding }: { finding: QaFinding }) {
 
 function AnalysisReport({ result }: { result: QaImportResult }) {
   const { analysis, repository } = result;
+  const missingTestScript = analysis.findings.some((finding) => finding.ruleId === "qa.testing.missing_test_script");
+  const testScriptState = analysis.inspectedFiles.some((file) => file.path === "package.json")
+    ? (missingTestScript ? "No declarado en el package.json inspeccionado" : "Declarado en el package.json inspeccionado")
+    : "Desconocido: package.json no formó parte de la muestra";
+  const omittedFiles = Math.max(0, repository.inventory.discoveredFiles - repository.inventory.selectedFiles);
   return (
     <section className="qa-analysis-report" aria-labelledby="qa-report-title">
       <header className="qa-report-heading">
@@ -126,8 +131,8 @@ function AnalysisReport({ result }: { result: QaImportResult }) {
         </span>
       </header>
       <p className="qa-report-summary">
-        Se inspeccionaron {repository.inspectedFileCount} {repository.inspectedFileCount === 1 ? "archivo de texto" : "archivos de texto"} del repositorio público. {analysis.findings.length === 0
-          ? "No se encontraron problemas mediante las comprobaciones ejecutadas."
+        El repositorio público tiene {repository.inventory.discoveredFiles} archivos inventariados por metadatos y se inspeccionaron {repository.inspectedFileCount} {repository.inspectedFileCount === 1 ? "archivo de texto" : "archivos de texto"} seleccionados por categoría. {analysis.findings.length === 0
+          ? "Las comprobaciones estáticas sobre esa muestra no produjeron hallazgos."
           : `Se encontraron ${analysis.findings.length} ${analysis.findings.length === 1 ? "hallazgo verificable" : "hallazgos verificables"}.`}
       </p>
       <dl className="qa-report-meta">
@@ -141,7 +146,9 @@ function AnalysisReport({ result }: { result: QaImportResult }) {
         </div>
         <div>
           <dt>Pruebas del repositorio</dt>
-          <dd>No ejecutadas</dd>
+          <dd>{analysis.inventory.testFiles.discovered > 0
+            ? `${analysis.inventory.testFiles.discovered} rutas detectadas; ${analysis.inventory.testFiles.selected} inspeccionadas`
+            : "No observadas en las rutas inventariadas"}</dd>
         </div>
       </dl>
       <div className="qa-report-section">
@@ -166,14 +173,25 @@ function AnalysisReport({ result }: { result: QaImportResult }) {
             <p>{analysis.testExecution.reason}</p>
           </div>
           <div>
+            <h4>Pruebas: declaración e inventario</h4>
+            <p>Script: {testScriptState}.</p>
+            <p>Rutas de prueba detectadas: {analysis.inventory.testFiles.discovered}; descargadas en la muestra: {analysis.inventory.testFiles.selected}; ejecución: no ejecutada.</p>
+          </div>
+          <div>
+            <h4>Cobertura de la muestra</h4>
+            <ul>{repository.inventory.categories.map((category) => (
+              <li key={category.category}>{category.category}: {category.selected} seleccionados de {category.discovered} inventariados</li>
+            ))}</ul>
+          </div>
+          <div>
             <h4>Límites</h4>
             <ul>{analysis.limitations.map((limit) => <li key={limit}>{limit}</li>)}</ul>
           </div>
         </div>
       </details>
-      {(repository.skipped.invalidPath + repository.skipped.limitReached + repository.skipped.tooLarge) > 0 ? (
+      {omittedFiles > 0 || (repository.skipped.invalidPath + repository.skipped.limitReached + repository.skipped.tooLarge) > 0 ? (
         <p className="qa-scope-note">
-          Se omitieron {repository.skipped.invalidPath + repository.skipped.limitReached + repository.skipped.tooLarge} entradas por validación o límites de inspección. Las extensiones no compatibles también se excluyen por diseño.
+          {omittedFiles > 0 ? `${omittedFiles} archivos inventariados no se descargaron por el muestreo y sus límites. ` : ""}Se excluyeron {repository.skipped.invalidPath + repository.skipped.limitReached + repository.skipped.tooLarge} entradas adicionales por validación, tamaño o límites. Las extensiones no compatibles también se excluyen por diseño; no se concluye que se revisó todo el repositorio.
         </p>
       ) : null}
     </section>

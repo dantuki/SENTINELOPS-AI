@@ -7,15 +7,19 @@ autenticada y autorizada en un proyecto existente:
 
 1. Selecciona un workspace y un proyecto que la sesión puede consultar.
 2. Introduce una URL canónica de repositorio público de GitHub.
-3. La API obtiene un inventario acotado por la API REST pública de GitHub.
-4. Un motor determinista revisa archivos de texto seleccionados.
+3. La API obtiene un inventario de metadatos acotado por la API REST pública de GitHub y separa ese inventario del contenido descargado.
+4. Un motor determinista revisa una muestra de archivos de texto seleccionada por categoría.
 5. La interfaz muestra hallazgos con evidencia y permite preguntas locales sobre
    el informe de esa sesión.
 
-Está implementado el análisis de scripts de `package.json`, presencia de tests,
+Está implementado el análisis de scripts de `package.json`, inventario de rutas de tests,
 material con cabeceras de claves privadas y uso de `eval(...)`. Los hallazgos
 incluyen regla/versionado, archivo, rango de líneas, extracto redactado y
 SHA-256 del contenido inspeccionado. No se calcula un “score de calidad”.
+
+La selección descarga como máximo 30 archivos y conserva presupuestos deterministas: manifiestos principales (4), configuración de prueba/lint/CI (4), rutas de prueba (8), código representativo (10) y documentación técnica (4). Las rutas restantes se inventarían sólo como metadatos y se declaran como no descargadas; la interfaz nunca afirma que todo el repositorio fue revisado.
+
+Las pruebas se comunican por separado: script declarado en un manifiesto inspeccionado, rutas detectadas en el inventario y ejecución (`not_executed`). No observar una ruta de pruebas en la muestra ni un script en un manifiesto omitido no permite concluir que el repositorio carece de pruebas.
 
 El flujo no sustituye ni modifica `/investigation`, el Verified Fact Engine,
 la procedencia de evidencia, el evaluador INC-001 ni Product Gate V2. Es un

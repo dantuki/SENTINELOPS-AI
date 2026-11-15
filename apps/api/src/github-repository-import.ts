@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import type { QaSourceFile } from "./qa-analysis.js";
+import type {
+  QaInventoryCategory,
+  QaRepositoryInventory,
+  QaSourceFile,
+} from "./qa-analysis.js";
 
 export const DEFAULT_GITHUB_IMPORT_LIMITS = {
   maxTreeEntries: 2_000,
@@ -37,6 +41,7 @@ export interface GithubImportedRepository extends GithubRepositoryReference {
   defaultBranch: string;
   revision: string;
   files: QaSourceFile[];
+  inventory: QaRepositoryInventory;
   skipped: {
     unsupported: number;
     tooLarge: number;
@@ -77,6 +82,18 @@ const TEXT_EXTENSIONS = new Set([
 const EXCLUDED_DIRECTORY = new Set([
   ".git", ".next", "build", "coverage", "dist", "node_modules", "vendor",
 ]);
+const CATEGORY_BUDGETS: Record<QaInventoryCategory, number> = {
+  manifest: 4,
+  test_configuration: 4,
+  test: 8,
+  source: 10,
+  documentation: 4,
+  other: 0,
+};
+const MANIFEST_NAMES = new Set([
+  "package.json", "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
+  "pytest.ini", "tox.ini", "pom.xml", "build.gradle", "cargo.toml", "go.mod",
+]);
 
 function contentHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -112,6 +129,47 @@ function isSupportedTextPath(path: string): boolean {
   if (fileName === "package.json" || fileName === "tsconfig.json") return true;
   const extension = fileName.includes(".") ? `.${fileName.split(".").at(-1)}` : "";
   return TEXT_EXTENSIONS.has(extension);
+}
+
+function isTestPath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  const segments = normalized.split("/");
+  const fileName = segments.at(-1) ?? "";
+  return (
+    segments.some((segment) => segment === "test" || segment === "tests" || segment === "__tests__") ||
+    /(?:^|[._-])(?:test|spec)(?:[._-]|$)/u.test(fileName) ||
+    /^test_.+\.(?:[cm]?[jt]sx?|py)$/u.test(fileName) ||
+    /_test\.py$/u.test(fileName)
+  );
+}
+
+function categoryForPath(path: string): QaInventoryCategory {
+  const normalized = path.toLowerCase();
+  const segments = normalized.split("/");
+  const fileName = segments.at(-1) ?? "";
+  if (MANIFEST_NAMES.has(fileName)) return "manifest";
+  if (isTestPath(path)) return "test";
+  if (
+    normalized.startsWith(".github/workflows/") ||
+    /(?:^|\/)(?:jest|vitest|mocha|ava|playwright|cypress|eslint|prettier|tsconfig)(?:\.|$)/u.test(normalized) ||
+    fileName.startsWith(".eslintrc")
+  ) return "test_configuration";
+  if (fileName === "readme.md" || normalized.startsWith("docs/")) return "documentation";
+  if (segments.some((segment) => ["src", "lib", "app", "server"].includes(segment))) return "source";
+  return "other";
+}
+
+function categoryPriority(path: string): number {
+  const normalized = path.toLowerCase();
+  if (normalized === "package.json" || normalized === "pyproject.toml") return 0;
+  if (normalized === "readme.md") return 0;
+  if (normalized.startsWith(".github/workflows/")) return 0;
+  return normalized.split("/").length;
+}
+
+function compareCandidates(left: GithubTreeEntry, right: GithubTreeEntry): number {
+  const priority = categoryPriority(left.path) - categoryPriority(right.path);
+  return priority === 0 ? comparePaths(left.path, right.path) : priority;
 }
 
 async function readResponseTextAtMost(
@@ -293,7 +351,10 @@ export async function importPublicGithubRepository(
   }
 
   const skipped = { unsupported: 0, tooLarge: 0, invalidPath: 0, limitReached: 0 };
-  const candidates: GithubTreeEntry[] = [];
+  const candidates = new Map<QaInventoryCategory, GithubTreeEntry[]>();
+  const discoveredByCategory: Record<QaInventoryCategory, number> = {
+    manifest: 0, test_configuration: 0, source: 0, test: 0, documentation: 0, other: 0,
+  };
   for (const entry of tree.tree) {
     if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.type !== "string") {
       skipped.invalidPath += 1;
@@ -303,7 +364,13 @@ export async function importPublicGithubRepository(
       skipped.invalidPath += 1;
       continue;
     }
-    if (entry.type !== "blob" || !isSupportedTextPath(entry.path)) {
+    if (entry.type !== "blob") {
+      skipped.unsupported += 1;
+      continue;
+    }
+    const category = categoryForPath(entry.path);
+    discoveredByCategory[category] += 1;
+    if (!isSupportedTextPath(entry.path)) {
       skipped.unsupported += 1;
       continue;
     }
@@ -311,43 +378,72 @@ export async function importPublicGithubRepository(
       skipped.tooLarge += 1;
       continue;
     }
-    candidates.push(entry as GithubTreeEntry);
+    const group = candidates.get(category) ?? [];
+    group.push(entry as GithubTreeEntry);
+    candidates.set(category, group);
   }
 
   const files: QaSourceFile[] = [];
+  const selectedByCategory: Record<QaInventoryCategory, number> = {
+    manifest: 0, test_configuration: 0, source: 0, test: 0, documentation: 0, other: 0,
+  };
   let totalBytes = 0;
-  for (const entry of [...candidates].sort((left, right) => comparePaths(left.path, right.path))) {
-    if (files.length >= limits.maxFiles || totalBytes + (entry.size ?? 0) > limits.maxTotalBytes) {
-      skipped.limitReached += 1;
-      continue;
+  for (const category of Object.keys(CATEGORY_BUDGETS) as QaInventoryCategory[]) {
+    const entries = (candidates.get(category) ?? []).sort(compareCandidates);
+    for (const entry of entries) {
+      if (
+        selectedByCategory[category] >= CATEGORY_BUDGETS[category] ||
+        files.length >= limits.maxFiles ||
+        totalBytes + (entry.size ?? 0) > limits.maxTotalBytes
+      ) {
+        skipped.limitReached += 1;
+        continue;
+      }
+      const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
+      const contentUrl = new URL(`${repositoryPath}/contents/${encodedPath}`, apiBase);
+      contentUrl.searchParams.set("ref", tree.sha);
+      const contentResponse = await githubJson(
+        fetchImpl,
+        contentUrl,
+        Math.min(limits.maxJsonBytes, limits.maxFileBytes * 3),
+        limits.timeoutMs,
+      );
+      if (!hasExpectedKeys(contentResponse.payload, ["encoding", "content"])) {
+        throw new GithubImportError("github_invalid_response");
+      }
+      const content = decodeContent(contentResponse.payload as GithubContentResponse, limits.maxFileBytes);
+      const byteLength = Buffer.byteLength(content, "utf8");
+      if (totalBytes + byteLength > limits.maxTotalBytes) {
+        skipped.limitReached += 1;
+        continue;
+      }
+      totalBytes += byteLength;
+      selectedByCategory[category] += 1;
+      files.push({ path: entry.path, content, byteLength, contentSha256: contentHash(content) });
     }
-    const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
-    const contentUrl = new URL(`${repositoryPath}/contents/${encodedPath}`, apiBase);
-    contentUrl.searchParams.set("ref", tree.sha);
-    const contentResponse = await githubJson(
-      fetchImpl,
-      contentUrl,
-      Math.min(limits.maxJsonBytes, limits.maxFileBytes * 3),
-      limits.timeoutMs,
-    );
-    if (!hasExpectedKeys(contentResponse.payload, ["encoding", "content"])) {
-      throw new GithubImportError("github_invalid_response");
-    }
-    const content = decodeContent(contentResponse.payload as GithubContentResponse, limits.maxFileBytes);
-    const byteLength = Buffer.byteLength(content, "utf8");
-    if (totalBytes + byteLength > limits.maxTotalBytes) {
-      skipped.limitReached += 1;
-      continue;
-    }
-    totalBytes += byteLength;
-    files.push({ path: entry.path, content, byteLength, contentSha256: contentHash(content) });
   }
+
+  const inventory: QaRepositoryInventory = {
+    selectionStrategy: "category_priority_v1",
+    discoveredFiles: Object.values(discoveredByCategory).reduce((total, value) => total + value, 0),
+    selectedFiles: files.length,
+    categories: (Object.keys(CATEGORY_BUDGETS) as QaInventoryCategory[]).map((category) => ({
+      category,
+      discovered: discoveredByCategory[category],
+      selected: selectedByCategory[category],
+    })),
+    testFiles: {
+      discovered: discoveredByCategory.test,
+      selected: selectedByCategory.test,
+    },
+  };
 
   return {
     ...reference,
     defaultBranch: metadata.default_branch,
     revision: tree.sha,
     files,
+    inventory,
     skipped,
   };
 }
