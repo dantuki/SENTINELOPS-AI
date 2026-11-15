@@ -33,6 +33,35 @@ export interface QaAnalysisRunRecord {
   completedAt: Date;
 }
 
+/**
+ * The durable portion of a finding. Evidence excerpts and repository bodies are
+ * deliberately omitted: only their location and content identity are retained.
+ */
+export interface QaPersistedFindingRecord {
+  id: string;
+  ruleId: string;
+  ruleVersion: string;
+  category: QaFinding["category"];
+  importance: QaFinding["importance"];
+  title: string;
+  description: string;
+  recommendation: string;
+  evidence: Pick<QaFinding["evidence"], "filePath" | "startLine" | "endLine" | "contentSha256">;
+}
+
+export interface QaPersistedAnalysisRunRecord extends QaAnalysisRunRecord {
+  reportSummary: {
+    rulesetVersion: string;
+    detectedStack: string[];
+    inspectedFileCount: number;
+    findingCount: number;
+    limitations: string[];
+    testExecution: QaAnalysisReport["testExecution"];
+  };
+  inventory: QaAnalysisReport["inventory"];
+  findings: QaPersistedFindingRecord[];
+}
+
 const CONVERSATION_COLUMNS = `
   id AS "id", project_id AS "projectId", title AS "title", is_pinned AS "isPinned",
   created_at AS "createdAt", updated_at AS "updatedAt", last_message_at AS "lastMessageAt"
@@ -45,6 +74,14 @@ const RUN_COLUMNS = `
   id AS "id", project_id AS "projectId", conversation_id AS "conversationId",
   analysis_id AS "analysisId", repository_url AS "repositoryUrl", revision AS "revision",
   status AS "status", completed_at AS "completedAt"
+`;
+const QUALIFIED_RUN_COLUMNS = `
+  qa_analysis_runs.id AS "id", qa_analysis_runs.project_id AS "projectId",
+  qa_analysis_runs.conversation_id AS "conversationId",
+  qa_analysis_runs.analysis_id AS "analysisId",
+  qa_analysis_runs.repository_url AS "repositoryUrl",
+  qa_analysis_runs.revision AS "revision", qa_analysis_runs.status AS "status",
+  qa_analysis_runs.completed_at AS "completedAt"
 `;
 
 function safeReportSummary(report: QaAnalysisReport): Record<string, unknown> {
@@ -141,6 +178,61 @@ export class QaConversationRepository {
       FROM qa_conversation_messages
       WHERE project_id = $1::uuid AND conversation_id = $2::uuid
       ORDER BY created_at ASC, id ASC
+    `, [projectId, conversationId]);
+    return result.rows;
+  }
+
+  /**
+   * Returns only report fields that migration 009 durably stores. This is kept
+   * separate from the live import result so callers cannot mistake a historical
+   * reference for a retained evidence excerpt.
+   */
+  async listCompletedAnalyses(
+    projectId: string,
+    conversationId: string,
+  ): Promise<QaPersistedAnalysisRunRecord[]> {
+    const result = await this.pool.query<QaPersistedAnalysisRunRecord>(`
+      SELECT
+        ${QUALIFIED_RUN_COLUMNS},
+        qa_analysis_runs.report_summary AS "reportSummary",
+        qa_analysis_runs.inventory AS "inventory",
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'id', qa_analysis_findings.id,
+              'ruleId', qa_analysis_findings.rule_id,
+              'ruleVersion', qa_analysis_findings.rule_version,
+              'category', qa_analysis_findings.category,
+              'importance', qa_analysis_findings.importance,
+              'title', qa_analysis_findings.title,
+              'description', qa_analysis_findings.description,
+              'recommendation', qa_analysis_findings.recommendation,
+              'evidence', jsonb_build_object(
+                'filePath', qa_analysis_findings.evidence_path,
+                'startLine', qa_analysis_findings.evidence_start_line,
+                'endLine', qa_analysis_findings.evidence_end_line,
+                'contentSha256', qa_analysis_findings.evidence_content_sha256
+              )
+            )
+            ORDER BY
+              CASE qa_analysis_findings.importance
+                WHEN 'high' THEN 0
+                WHEN 'warning' THEN 1
+                ELSE 2
+              END,
+              qa_analysis_findings.id
+          ) FILTER (WHERE qa_analysis_findings.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS "findings"
+      FROM qa_analysis_runs
+      LEFT JOIN qa_analysis_findings
+        ON qa_analysis_findings.analysis_run_id = qa_analysis_runs.id
+        AND qa_analysis_findings.project_id = qa_analysis_runs.project_id
+      WHERE qa_analysis_runs.project_id = $1::uuid
+        AND qa_analysis_runs.conversation_id = $2::uuid
+        AND qa_analysis_runs.status = 'completed'
+      GROUP BY qa_analysis_runs.id
+      ORDER BY qa_analysis_runs.completed_at DESC, qa_analysis_runs.id DESC
     `, [projectId, conversationId]);
     return result.rows;
   }

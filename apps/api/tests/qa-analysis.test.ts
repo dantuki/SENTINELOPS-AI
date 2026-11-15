@@ -17,6 +17,7 @@ import {
   registerQaConversationRoutes,
   type QaConversationMemoryStore,
 } from "../src/qa-conversation-routes.js";
+import { QaConversationRepository } from "../src/qa-conversation-repository.js";
 import type {
   CreateProjectSourceInput,
   EnsureProjectSourceResult,
@@ -25,6 +26,26 @@ import type {
 import { createTestSecurity } from "./security-test-fixture.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
+
+test("historical analysis lookup qualifies joined run columns and retains both scopes", async () => {
+  let statement = "";
+  let parameters: readonly unknown[] = [];
+  const repository = new QaConversationRepository({
+    query: async (query: string, values?: readonly unknown[]) => {
+      statement = query;
+      parameters = values ?? [];
+      return { rows: [] };
+    },
+  } as never);
+
+  await repository.listCompletedAnalyses(projectId, "22222222-2222-4222-8222-222222222222");
+
+  assert.match(statement, /qa_analysis_runs\.id AS "id"/);
+  assert.match(statement, /qa_analysis_findings\.analysis_run_id = qa_analysis_runs\.id/);
+  assert.match(statement, /qa_analysis_runs\.project_id = \$1::uuid/);
+  assert.match(statement, /qa_analysis_runs\.conversation_id = \$2::uuid/);
+  assert.deepEqual(parameters, [projectId, "22222222-2222-4222-8222-222222222222"]);
+});
 
 function file(path: string, content: string): QaSourceFile {
   return {
@@ -406,6 +427,55 @@ test("GitHub QA route requires persistence, authorizes project scope, and persis
   }
 });
 
+test("GitHub QA retains a completed report and identifies unavailable conversation persistence", async () => {
+  const security = createTestSecurity();
+  const app = buildApp({
+    logger: false,
+    securityStore: security.securityStore,
+    securityConfig: security.securityConfig,
+  });
+  app.addHook("onRequest", async (request) => security.addTestCredentials(request));
+  registerQaRoutes(app, {
+    sourceStore: {
+      listForProject: async () => [],
+      ensureForProject: async () => ({ source: fakeSource(), created: true }),
+      activateIfEnabled: async () => true,
+    },
+    conversationStore: {
+      getConversation: async () => null,
+      createConversation: async () => ({
+        id: "33333333-3333-4333-8333-333333333333",
+        projectId,
+        title: "acme/demo",
+        isPinned: false,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        lastMessageAt: new Date("2026-01-01T00:00:00.000Z"),
+      }),
+      recordCompletedAnalysis: async () => null,
+      addMessage: async () => null,
+    },
+    fetchImpl: githubFixtureFetch(),
+  });
+
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/qa/github`,
+      payload: { repositoryUrl: "https://github.com/acme/demo" },
+    });
+    assert.equal(response.statusCode, 200);
+    const payload = response.json() as {
+      data: { analysis: { analysisId: string }; conversation?: unknown; persistence?: { status: string } };
+    };
+    assert.match(payload.data.analysis.analysisId, /^qa-/u);
+    assert.equal(payload.data.conversation, undefined);
+    assert.equal(payload.data.persistence?.status, "unavailable");
+  } finally {
+    await app.close();
+  }
+});
+
 test("disabled GitHub sources cannot be reimported and do not trigger an external fetch", async () => {
   const security = createTestSecurity();
   const app = buildApp({
@@ -471,6 +541,54 @@ test("QA conversation memory routes retain project scope, pins, and message role
     getConversation: async (id, id2) => id === projectId && id2 === conversation.id ? conversation : null,
     setPinned: async (_id, _conversationId, isPinned) => ({ ...conversation, isPinned }),
     listMessages: async () => messages,
+    listCompletedAnalyses: async () => [{
+      id: "44444444-4444-4444-8444-444444444444",
+      projectId,
+      conversationId: conversation.id,
+      analysisId: "qa-111111111111111111111111",
+      repositoryUrl: "https://github.com/acme/demo",
+      revision: "abc123",
+      status: "completed",
+      completedAt: new Date("2026-01-01T00:00:00.000Z"),
+      reportSummary: {
+        rulesetVersion: "qa-static-v1",
+        detectedStack: ["TypeScript"],
+        inspectedFileCount: 2,
+        findingCount: 1,
+        limitations: ["No se ejecutó código."],
+        testExecution: { status: "not_executed", reason: "Solo análisis estático." },
+      },
+      inventory: {
+        selectionStrategy: "category_priority_v1",
+        discoveredFiles: 2,
+        selectedFiles: 2,
+        categories: [
+          { category: "manifest", discovered: 1, selected: 1 },
+          { category: "test_configuration", discovered: 0, selected: 0 },
+          { category: "source", discovered: 1, selected: 1 },
+          { category: "test", discovered: 0, selected: 0 },
+          { category: "documentation", discovered: 0, selected: 0 },
+          { category: "other", discovered: 0, selected: 0 },
+        ],
+        testFiles: { discovered: 0, selected: 0 },
+      },
+      findings: [{
+        id: "qa-11111111111111111111",
+        ruleId: "qa.security.dynamic_eval",
+        ruleVersion: "qa-static-v1",
+        category: "security",
+        importance: "warning",
+        title: "Se detectó una llamada a eval",
+        description: "El análisis estático encontró una llamada a eval.",
+        recommendation: "Sustituye eval.",
+        evidence: {
+          filePath: "src/index.ts",
+          startLine: 3,
+          endLine: 3,
+          contentSha256: "a".repeat(64),
+        },
+      }],
+    }],
     addMessage: async (_projectId, conversationId, authorUserId, role, body) => {
       const message = { id: `message-${messages.length + 1}`, conversationId, projectId, authorUserId, role, body, createdAt: new Date() };
       messages.push(message);
@@ -497,6 +615,11 @@ test("QA conversation memory routes retain project scope, pins, and message role
     const detail = await app.inject({ method: "GET", url: `/api/projects/${projectId}/qa/conversations/${conversation.id}` });
     assert.equal(detail.statusCode, 200);
     assert.equal((detail.json() as { data: { messages: unknown[] } }).data.messages.length, 1);
+    const analysis = (detail.json() as {
+      data: { analyses: Array<{ analysisId: string; findings: Array<{ evidence: { contentSha256: string } }> }> };
+    }).data.analyses[0];
+    assert.equal(analysis?.analysisId, "qa-111111111111111111111111");
+    assert.equal(analysis?.findings[0]?.evidence.contentSha256, "a".repeat(64));
   } finally {
     await app.close();
   }

@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import type {
   QaConversationMessageRecord,
   QaConversationRecord,
+  QaPersistedAnalysisRunRecord,
 } from "./qa-conversation-repository.js";
 
 export interface QaConversationMemoryStore {
@@ -11,6 +12,7 @@ export interface QaConversationMemoryStore {
   getConversation(projectId: string, conversationId: string): Promise<QaConversationRecord | null>;
   setPinned(projectId: string, conversationId: string, isPinned: boolean): Promise<QaConversationRecord | null>;
   listMessages(projectId: string, conversationId: string): Promise<QaConversationMessageRecord[] | null>;
+  listCompletedAnalyses(projectId: string, conversationId: string): Promise<QaPersistedAnalysisRunRecord[]>;
   addMessage(
     projectId: string,
     conversationId: string,
@@ -66,8 +68,11 @@ export function registerQaConversationRoutes(
       if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
       const conversation = await repository.getConversation(request.params.projectId, request.params.conversationId);
       if (!conversation) return reply.code(404).send({ error: "Resource not found" });
-      const messages = await repository.listMessages(request.params.projectId, request.params.conversationId);
-      return reply.send({ data: { conversation, messages: messages ?? [] } });
+      const [messages, analyses] = await Promise.all([
+        repository.listMessages(request.params.projectId, request.params.conversationId),
+        repository.listCompletedAnalyses(request.params.projectId, request.params.conversationId),
+      ]);
+      return reply.send({ data: { conversation, messages: messages ?? [], analyses } });
     },
   );
 

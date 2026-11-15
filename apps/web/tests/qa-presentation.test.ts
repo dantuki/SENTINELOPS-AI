@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   answerQaQuestion,
   isQaImportResult,
+  isQaPersistedAnalysis,
   type QaImportResult,
 } from "../src/lib/qa-presentation.ts";
 import { isGithubQaRequest } from "../src/lib/qa-request.ts";
@@ -100,6 +101,8 @@ test("the QA presentation contract preserves source evidence and rejects malform
   assert.equal(isQaImportResult({ ...fixture, source: { ...fixture.source, status: "pending" } }), false);
   assert.equal(isQaImportResult({ ...fixture, repository: { ...fixture.repository, skipped: {} } }), false);
   assert.equal(isQaImportResult({ ...fixture, conversation: { id: "x" } }), false);
+  assert.equal(isQaImportResult({ ...fixture, persistence: { status: "unavailable" } }), true);
+  assert.equal(isQaImportResult({ ...fixture, persistence: { status: "persisted" } }), false);
   assert.equal(isQaImportResult({ ...fixture, analysis: { ...fixture.analysis, inventory: { ...fixture.analysis.inventory, testFiles: {} as unknown as { discovered: number; selected: number } } } }), false);
 });
 
@@ -109,4 +112,44 @@ test("the local report conversation preserves test-execution limits and evidence
   assert.match(answerQaQuestion("¿Dónde está la evidencia?", report), /src\/index\.ts, línea 7/iu);
   assert.match(answerQaQuestion("¿Qué debería corregir?", report), /Retira y rota/iu);
   assert.match(answerQaQuestion("¿Cuál fue la causa raíz?", report), /no genera conclusiones fuera del informe/iu);
+});
+
+test("a persisted QA report retains finding identity and references without requiring an excerpt", () => {
+  const persisted = {
+    id: "run-1",
+    projectId: "project-1",
+    conversationId: "conversation-1",
+    analysisId: "qa-111111111111111111111111",
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "abc123",
+    status: "completed",
+    completedAt: "2026-01-01T00:00:00.000Z",
+    reportSummary: {
+      rulesetVersion: "qa-static-v1",
+      detectedStack: ["TypeScript"],
+      inspectedFileCount: 2,
+      findingCount: 1,
+      limitations: ["No se ejecutó código."],
+      testExecution: { status: "not_executed", reason: "No se ejecuta código del repositorio importado." },
+    },
+    inventory: reportFixture().analysis.inventory,
+    findings: [{
+      id: "qa-11111111111111111111",
+      ruleId: "qa.security.dynamic_eval",
+      ruleVersion: "qa-static-v1",
+      category: "security",
+      importance: "warning",
+      title: "Se detectó una llamada a eval",
+      description: "El análisis estático encontró una llamada a eval.",
+      recommendation: "Sustituye eval.",
+      evidence: {
+        filePath: "src/index.ts",
+        startLine: 3,
+        endLine: 3,
+        contentSha256: "a".repeat(64),
+      },
+    }],
+  };
+  assert.equal(isQaPersistedAnalysis(persisted), true);
+  assert.equal(isQaPersistedAnalysis({ ...persisted, findings: [{ ...persisted.findings[0], evidence: { ...persisted.findings[0].evidence, contentSha256: null } }] }), false);
 });

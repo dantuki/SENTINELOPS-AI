@@ -4,10 +4,12 @@ import {
   answerQaQuestion,
   importanceLabel,
   isQaImportResult,
+  isQaPersistedAnalysis,
   type QaConversation,
   type QaConversationMessage,
   type QaFinding,
   type QaImportResult,
+  type QaPersistedAnalysis,
 } from "@/lib/qa-presentation";
 import { isGithubQaRequest } from "@/lib/qa-request";
 import {
@@ -132,6 +134,82 @@ function FindingCard({ finding }: { finding: QaFinding }) {
   );
 }
 
+function HistoricalFindingCard({ finding }: { finding: QaPersistedAnalysis["findings"][number] }) {
+  return (
+    <article className="qa-finding-card">
+      <div className="qa-finding-heading">
+        <span className={`qa-importance qa-importance--${finding.importance}`}>
+          {importanceLabel(finding.importance)}
+        </span>
+        <span className="qa-finding-category">{finding.category}</span>
+      </div>
+      <h4>{finding.title}</h4>
+      <p>{finding.description}</p>
+      <dl className="qa-finding-details">
+        <div>
+          <dt>Cómo comprobar/corregir</dt>
+          <dd>{finding.recommendation}</dd>
+        </div>
+      </dl>
+      <details className="qa-evidence">
+        <summary>Ver referencia de evidencia persistida</summary>
+        <p>
+          <code>{finding.evidence.filePath}</code> · líneas {finding.evidence.startLine}–{finding.evidence.endLine}
+        </p>
+        <p className="qa-evidence-note">
+          Identidad de contenido: <code>{finding.evidence.contentSha256}</code>
+        </p>
+        <p className="qa-evidence-note">El extracto no se retuvo por diseño; esta referencia no reconstruye contenido del repositorio.</p>
+      </details>
+    </article>
+  );
+}
+
+function HistoricalAnalysisReport({ analysis }: { analysis: QaPersistedAnalysis }) {
+  return (
+    <section className="qa-analysis-report" aria-labelledby={`qa-historical-report-${analysis.id}`}>
+      <header className="qa-report-heading">
+        <div>
+          <p className="qa-kicker">INFORME PERSISTIDO · REFERENCIAS VERIFICABLES</p>
+          <h3 id={`qa-historical-report-${analysis.id}`}>{analysis.repositoryUrl}</h3>
+        </div>
+        <span className="qa-source-state">Completado</span>
+      </header>
+      <p className="qa-report-summary">
+        Este informe conservó {analysis.reportSummary.findingCount} {analysis.reportSummary.findingCount === 1 ? "hallazgo verificable" : "hallazgos verificables"} y metadatos de {analysis.reportSummary.inspectedFileCount} archivos inspeccionados. No reconstruye cuerpos ni extractos que no fueron persistidos.
+      </p>
+      <dl className="qa-report-meta">
+        <div>
+          <dt>Revisión</dt>
+          <dd><code>{analysis.revision.slice(0, 12)}</code></dd>
+        </div>
+        <div>
+          <dt>Stack detectado</dt>
+          <dd>{analysis.reportSummary.detectedStack.length > 0 ? analysis.reportSummary.detectedStack.join(" · ") : "No identificado por las reglas actuales"}</dd>
+        </div>
+        <div>
+          <dt>Pruebas del repositorio</dt>
+          <dd>{analysis.reportSummary.testExecution.reason}</dd>
+        </div>
+      </dl>
+      <div className="qa-report-section">
+        <h4>Hallazgos y referencias retenidas</h4>
+        {analysis.findings.length > 0 ? (
+          <div className="qa-findings-grid">
+            {analysis.findings.map((finding) => <HistoricalFindingCard key={finding.id} finding={finding} />)}
+          </div>
+        ) : (
+          <p className="qa-empty">Las comprobaciones estáticas ejecutadas no produjeron hallazgos. Esto no equivale a que el proyecto esté libre de defectos o vulnerabilidades.</p>
+        )}
+      </div>
+      <details className="qa-report-details">
+        <summary>Límites del informe persistido</summary>
+        <ul>{analysis.reportSummary.limitations.map((limit) => <li key={limit}>{limit}</li>)}</ul>
+      </details>
+    </section>
+  );
+}
+
 function AnalysisReport({ result }: { result: QaImportResult }) {
   const { analysis, repository } = result;
   const missingTestScript = analysis.findings.some((finding) => finding.ruleId === "qa.testing.missing_test_script");
@@ -229,6 +307,7 @@ export function QaWorkspace() {
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const [analysisResult, setAnalysisResult] = useState<QaImportResult | null>(null);
+  const [persistedAnalyses, setPersistedAnalyses] = useState<QaPersistedAnalysis[]>([]);
   const [conversations, setConversations] = useState<QaConversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [historyError, setHistoryError] = useState("");
@@ -329,6 +408,7 @@ export function QaWorkspace() {
     importController.current?.abort();
     setProjectId(nextProjectId);
     setAnalysisResult(null);
+    setPersistedAnalyses([]);
     setActiveConversationId("");
     setImportError("");
     setMessages([
@@ -344,6 +424,7 @@ export function QaWorkspace() {
     importController.current?.abort();
     setActiveConversationId("");
     setAnalysisResult(null);
+    setPersistedAnalyses([]);
     setImportError("");
     setMessages([{ id: `new-${Date.now()}`, role: "assistant", text: "Nuevo análisis. Conecta un repositorio público de GitHub para crear un informe verificable." }]);
   }
@@ -354,11 +435,18 @@ export function QaWorkspace() {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(conversation.id)}`, { cache: "no-store" });
       const payload: unknown = await response.json();
       const data = response.ok && payload && typeof payload === "object" && "data" in payload && typeof payload.data === "object" && payload.data !== null
-        ? payload.data as { messages?: unknown }
+        ? payload.data as { messages?: unknown; analyses?: unknown }
         : null;
-      if (!data || !Array.isArray(data.messages) || !data.messages.every(isConversationMessage)) throw new Error("invalid history");
+      if (
+        !data ||
+        !Array.isArray(data.messages) ||
+        !data.messages.every(isConversationMessage) ||
+        !Array.isArray(data.analyses) ||
+        !data.analyses.every(isQaPersistedAnalysis)
+      ) throw new Error("invalid history");
       setActiveConversationId(conversation.id);
       setAnalysisResult(null);
+      setPersistedAnalyses(data.analyses);
       setMessages(data.messages.map((message) => ({
         id: message.id,
         role: message.role === "user" ? "user" : "assistant",
@@ -413,9 +501,15 @@ export function QaWorkspace() {
       const result = responsePayload.data;
       if (!isQaImportResult(result)) throw new Error(String(response.status));
       setAnalysisResult(result);
+      setPersistedAnalyses([]);
       if (result.conversation) {
         setActiveConversationId(result.conversation.id);
         await loadConversations();
+      }
+      if (result.persistence?.status === "unavailable") {
+        setHistoryError("El informe sigue disponible en esta sesión, pero no se pudo guardar en el historial.");
+      } else {
+        setHistoryError("");
       }
       setMessages((current) => [...current, {
         id: `report-${result.analysis.analysisId}`,
@@ -528,6 +622,7 @@ export function QaWorkspace() {
             </article>
           ))}
           {analysisResult ? <AnalysisReport result={analysisResult} /> : null}
+          {!analysisResult ? persistedAnalyses.map((analysis) => <HistoricalAnalysisReport key={analysis.id} analysis={analysis} />) : null}
         </div>
 
         {!analysisResult ? (

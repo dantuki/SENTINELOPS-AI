@@ -62,6 +62,9 @@ export interface QaImportResult {
     created: boolean;
     status: "active";
   };
+  persistence?: {
+    status: "unavailable";
+  };
   conversation?: QaConversation;
   repository: {
     url: string;
@@ -99,6 +102,50 @@ export interface QaConversationMessage {
   role: "user" | "assistant" | "system";
   body: string;
   createdAt: string;
+}
+
+/**
+ * Historical QA data intentionally excludes repository bodies and evidence
+ * excerpts. It is enough to keep a report traceable without turning memory
+ * into a second copy of an imported repository.
+ */
+export interface QaPersistedAnalysis {
+  id: string;
+  projectId: string;
+  conversationId: string;
+  analysisId: string;
+  repositoryUrl: string;
+  revision: string;
+  status: "completed";
+  completedAt: string;
+  reportSummary: {
+    rulesetVersion: string;
+    detectedStack: string[];
+    inspectedFileCount: number;
+    findingCount: number;
+    limitations: string[];
+    testExecution: {
+      status: "not_executed";
+      reason: string;
+    };
+  };
+  inventory: QaInventory;
+  findings: Array<{
+    id: string;
+    ruleId: string;
+    ruleVersion: string;
+    category: QaFinding["category"];
+    importance: QaImportance;
+    title: string;
+    description: string;
+    recommendation: string;
+    evidence: {
+      filePath: string;
+      startLine: number;
+      endLine: number;
+      contentSha256: string;
+    };
+  }>;
 }
 
 const findingCategories = ["configuration", "quality", "security", "testing"] as const;
@@ -163,6 +210,49 @@ function isInventory(value: unknown): value is QaInventory {
   );
 }
 
+function isPersistedFinding(value: unknown): value is QaPersistedAnalysis["findings"][number] {
+  if (!isRecord(value) || !isRecord(value.evidence)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.ruleId === "string" &&
+    typeof value.ruleVersion === "string" &&
+    findingCategories.includes(value.category as typeof findingCategories[number]) &&
+    ["info", "warning", "high"].includes(value.importance as QaImportance) &&
+    typeof value.title === "string" &&
+    typeof value.description === "string" &&
+    typeof value.recommendation === "string" &&
+    typeof value.evidence.filePath === "string" &&
+    typeof value.evidence.startLine === "number" &&
+    typeof value.evidence.endLine === "number" &&
+    typeof value.evidence.contentSha256 === "string"
+  );
+}
+
+export function isQaPersistedAnalysis(value: unknown): value is QaPersistedAnalysis {
+  if (!isRecord(value) || !isRecord(value.reportSummary)) return false;
+  const { reportSummary } = value;
+  return (
+    typeof value.id === "string" &&
+    typeof value.projectId === "string" &&
+    typeof value.conversationId === "string" &&
+    typeof value.analysisId === "string" &&
+    typeof value.repositoryUrl === "string" &&
+    typeof value.revision === "string" &&
+    value.status === "completed" &&
+    typeof value.completedAt === "string" &&
+    typeof reportSummary.rulesetVersion === "string" &&
+    isStringArray(reportSummary.detectedStack) &&
+    typeof reportSummary.inspectedFileCount === "number" &&
+    typeof reportSummary.findingCount === "number" &&
+    isStringArray(reportSummary.limitations) &&
+    isRecord(reportSummary.testExecution) &&
+    reportSummary.testExecution.status === "not_executed" &&
+    typeof reportSummary.testExecution.reason === "string" &&
+    isInventory(value.inventory) &&
+    Array.isArray(value.findings) && value.findings.every(isPersistedFinding)
+  );
+}
+
 function isConversation(value: unknown): value is QaConversation {
   return isRecord(value) &&
     typeof value.id === "string" &&
@@ -183,6 +273,7 @@ export function isQaImportResult(value: unknown): value is QaImportResult {
     typeof source.id === "string" &&
     typeof source.created === "boolean" &&
     source.status === "active" &&
+    (!("persistence" in value) || (isRecord(value.persistence) && value.persistence.status === "unavailable")) &&
     (!("conversation" in value) || isConversation(value.conversation)) &&
     typeof repository.url === "string" &&
     typeof repository.owner === "string" &&

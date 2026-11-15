@@ -52,6 +52,9 @@ interface GithubQaResult {
     created: boolean;
     status: "active";
   };
+  persistence?: {
+    status: "unavailable";
+  };
   conversation?: QaConversationRecord;
   repository: {
     url: string;
@@ -238,17 +241,20 @@ export function registerQaRoutes(
           files: imported.files,
           inventory: imported.inventory,
         });
-        if (options.conversationStore && !conversation && request.authUser) {
+        let persistenceUnavailable = !options.conversationStore || !request.authUser;
+        if (options.conversationStore && request.authUser) {
           try {
-            conversation = await options.conversationStore.createConversation(
-              request.params.projectId,
-              request.authUser.id,
-              `${imported.owner}/${imported.repository}`,
-            );
             if (!conversation) {
-              return reply.code(404).send({ error: "Resource not found" });
+              conversation = await options.conversationStore.createConversation(
+                request.params.projectId,
+                request.authUser.id,
+                `${imported.owner}/${imported.repository}`,
+              );
+              if (!conversation) {
+                return reply.code(404).send({ error: "Resource not found" });
+              }
             }
-            await options.conversationStore.recordCompletedAnalysis({
+            const recordedAnalysis = await options.conversationStore.recordCompletedAnalysis({
               projectId: request.params.projectId,
               conversationId: conversation.id,
               sourceId: persisted.source.id,
@@ -256,50 +262,29 @@ export function registerQaRoutes(
               revision: imported.revision,
               report: analysis,
             });
-            await options.conversationStore.addMessage(
+            if (!recordedAnalysis) throw new Error("QA analysis persistence was not confirmed");
+            const requestMessage = await options.conversationStore.addMessage(
               request.params.projectId,
               conversation.id,
               request.authUser.id,
               "user",
               imported.canonicalUrl,
             );
-            await options.conversationStore.addMessage(
+            const reportMessage = await options.conversationStore.addMessage(
               request.params.projectId,
               conversation.id,
               null,
               "assistant",
               `Análisis completado: ${analysis.findings.length} hallazgos verificables en ${imported.files.length} archivos inspeccionados.`,
             );
+            if (!requestMessage || !reportMessage) throw new Error("QA message persistence was not confirmed");
           } catch {
-            // The static report remains available while a pending additive migration is applied.
+            // A completed static report must remain visible, but its memory status
+            // must never be represented as successfully persisted.
             app.log.warn("QA conversation memory unavailable; returned non-persistent report");
             conversation = null;
+            persistenceUnavailable = true;
           }
-        } else if (options.conversationStore && conversation) {
-          await options.conversationStore.recordCompletedAnalysis({
-            projectId: request.params.projectId,
-            conversationId: conversation.id,
-            sourceId: persisted.source.id,
-            repositoryUrl: imported.canonicalUrl,
-            revision: imported.revision,
-            report: analysis,
-          });
-          if (request.authUser) {
-            await options.conversationStore.addMessage(
-              request.params.projectId,
-              conversation.id,
-              request.authUser.id,
-              "user",
-              imported.canonicalUrl,
-            );
-          }
-          await options.conversationStore.addMessage(
-            request.params.projectId,
-            conversation.id,
-            null,
-            "assistant",
-            `Análisis completado: ${analysis.findings.length} hallazgos verificables en ${imported.files.length} archivos inspeccionados.`,
-          );
         }
         const result: GithubQaResult = {
           source: { id: persisted.source.id, created: persisted.created, status: "active" },
@@ -314,6 +299,7 @@ export function registerQaRoutes(
             skipped: imported.skipped,
           },
           ...(conversation ? { conversation } : {}),
+          ...(persistenceUnavailable ? { persistence: { status: "unavailable" } } : {}),
           analysis,
         };
         return reply.code(200).send({ data: result });
