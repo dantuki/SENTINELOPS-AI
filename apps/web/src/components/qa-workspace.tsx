@@ -1,17 +1,21 @@
 "use client";
 
 import {
-  answerQaQuestion,
   importanceLabel,
-  isQaImportResult,
+  isQaAnalysisJob,
+  isQaAnalysisJobEvent,
+  isQaAssistantResponse,
   isQaPersistedAnalysis,
   type QaConversation,
   type QaConversationMessage,
+  type QaAnalysisJob,
+  type QaAnalysisJobEvent,
+  type QaAssistantResponse,
   type QaFinding,
   type QaImportResult,
   type QaPersistedAnalysis,
 } from "@/lib/qa-presentation";
-import { isGithubQaRequest } from "@/lib/qa-request";
+import { isGithubQaJobRequest } from "@/lib/qa-request";
 import {
   useEffect,
   useMemo,
@@ -36,6 +40,7 @@ interface ChatMessage {
   id: string;
   role: "assistant" | "user";
   text: string;
+  answer?: QaAssistantResponse;
 }
 
 function isConversation(value: unknown): value is QaConversation {
@@ -82,6 +87,17 @@ function dataArray<T>(value: unknown, isItem: (item: unknown) => item is T): T[]
     return null;
   }
   return value.data.every(isItem) ? value.data : null;
+}
+
+function dataObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || !("data" in value) || typeof value.data !== "object" || value.data === null) {
+    return null;
+  }
+  return value.data as Record<string, unknown>;
+}
+
+function jobStorageKey(projectId: string): string {
+  return `sentinelops:qa-analysis-job:${projectId}`;
 }
 
 function safeApiError(status: number): string {
@@ -305,13 +321,17 @@ export function QaWorkspace() {
   const [selectionError, setSelectionError] = useState("");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [isImporting, setIsImporting] = useState(false);
+  const [activeJobId, setActiveJobId] = useState("");
+  const [activeJob, setActiveJob] = useState<QaAnalysisJob | null>(null);
+  const [jobEvents, setJobEvents] = useState<QaAnalysisJobEvent[]>([]);
   const [importError, setImportError] = useState("");
-  const [analysisResult, setAnalysisResult] = useState<QaImportResult | null>(null);
   const [persistedAnalyses, setPersistedAnalyses] = useState<QaPersistedAnalysis[]>([]);
   const [conversations, setConversations] = useState<QaConversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [question, setQuestion] = useState("");
+  const [isAsking, setIsAsking] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -319,7 +339,7 @@ export function QaWorkspace() {
       text: "Conecta un repositorio público de GitHub para realizar un análisis estático verificable. No ejecutaré código, instalaciones ni pruebas del repositorio.",
     },
   ]);
-  const importController = useRef<AbortController | null>(null);
+  const lastSequence = useRef(0);
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === projectId) ?? null,
     [projectId, projects],
@@ -376,8 +396,6 @@ export function QaWorkspace() {
     return () => controller.abort();
   }, [workspaceId]);
 
-  useEffect(() => () => importController.current?.abort(), []);
-
   async function loadConversations(nextProjectId = projectId) {
     if (!nextProjectId) {
       setConversations([]);
@@ -404,10 +422,92 @@ export function QaWorkspace() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
+  useEffect(() => {
+    if (!projectId) {
+      setActiveJobId("");
+      setActiveJob(null);
+      setJobEvents([]);
+      return;
+    }
+    const persistedJobId = window.sessionStorage.getItem(jobStorageKey(projectId));
+    lastSequence.current = 0;
+    setActiveJob(null);
+    setJobEvents([]);
+    setActiveJobId(persistedJobId ?? "");
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId || !activeJobId) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      try {
+        const response = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/qa/jobs/${encodeURIComponent(activeJobId)}?afterSequence=${lastSequence.current}`,
+          { cache: "no-store" },
+        );
+        const payload = dataObject(await response.json());
+        const job = payload?.job;
+        const events = payload?.events;
+        if (!response.ok || !isQaAnalysisJob(job) || !Array.isArray(events) || !events.every(isQaAnalysisJobEvent)) {
+          throw new Error(String(response.status));
+        }
+        if (stopped) return;
+        setActiveJob(job);
+        if (events.length > 0) {
+          lastSequence.current = events.at(-1)?.sequence ?? lastSequence.current;
+          setJobEvents((current) => {
+            const bySequence = new Map(current.map((event) => [event.sequence, event]));
+            for (const event of events) bySequence.set(event.sequence, event);
+            return [...bySequence.values()].toSorted((left, right) => left.sequence - right.sequence);
+          });
+        }
+        if (job.status === "completed" || job.status === "failed") {
+          window.sessionStorage.removeItem(jobStorageKey(projectId));
+          setActiveJobId("");
+          setIsImporting(false);
+          if (job.status === "failed") {
+            setImportError(job.errorMessage ?? "El análisis no pudo completarse. Puedes iniciar uno nuevo.");
+            return;
+          }
+          setRepositoryUrl("");
+          await loadConversations(projectId);
+          if (job.conversationId) {
+            const conversation = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(job.conversationId)}`, { cache: "no-store" });
+            const detail = dataObject(await conversation.json());
+            if (!conversation.ok || !detail || !Array.isArray(detail.messages) || !detail.messages.every(isConversationMessage) || !Array.isArray(detail.analyses) || !detail.analyses.every(isQaPersistedAnalysis)) {
+              throw new Error("completed QA job detail unavailable");
+            }
+            if (!stopped) {
+              setActiveConversationId(job.conversationId);
+              setPersistedAnalyses(detail.analyses);
+              setMessages(detail.messages.map((message) => ({
+                id: message.id,
+                role: message.role === "user" ? "user" : "assistant",
+                text: message.body,
+              })));
+            }
+          }
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 900);
+      } catch (error: unknown) {
+        if (!stopped) {
+          const status = Number(error instanceof Error ? error.message : Number.NaN);
+          setImportError(safeApiError(status));
+          setIsImporting(false);
+        }
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeJobId, projectId]);
+
   function selectProject(nextProjectId: string) {
-    importController.current?.abort();
     setProjectId(nextProjectId);
-    setAnalysisResult(null);
     setPersistedAnalyses([]);
     setActiveConversationId("");
     setImportError("");
@@ -421,9 +521,7 @@ export function QaWorkspace() {
   }
 
   function startNewAnalysis() {
-    importController.current?.abort();
     setActiveConversationId("");
-    setAnalysisResult(null);
     setPersistedAnalyses([]);
     setImportError("");
     setMessages([{ id: `new-${Date.now()}`, role: "assistant", text: "Nuevo análisis. Conecta un repositorio público de GitHub para crear un informe verificable." }]);
@@ -445,7 +543,6 @@ export function QaWorkspace() {
         !data.analyses.every(isQaPersistedAnalysis)
       ) throw new Error("invalid history");
       setActiveConversationId(conversation.id);
-      setAnalysisResult(null);
       setPersistedAnalyses(data.analyses);
       setMessages(data.messages.map((message) => ({
         id: message.id,
@@ -475,93 +572,111 @@ export function QaWorkspace() {
 
   async function importRepository(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!projectId || isImporting) return;
-    const payload = { repositoryUrl: repositoryUrl.trim(), ...(activeConversationId ? { conversationId: activeConversationId } : {}) };
-    if (!isGithubQaRequest(payload)) {
+    if (!projectId || isImporting || activeJobId) return;
+    const payload = {
+      repositoryUrl: repositoryUrl.trim(),
+      ...(activeConversationId ? { conversationId: activeConversationId } : {}),
+      idempotencyKey: crypto.randomUUID(),
+    };
+    if (!isGithubQaJobRequest(payload)) {
       setImportError("Introduce una URL de repositorio público de GitHub.");
       return;
     }
-    importController.current?.abort();
-    const controller = new AbortController();
-    importController.current = controller;
     setIsImporting(true);
     setImportError("");
-    setMessages((current) => [...current, { id: `import-${Date.now()}`, role: "user", text: payload.repositoryUrl }]);
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/github`, {
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: controller.signal,
       });
-      const responsePayload: unknown = await response.json();
-      if (!response.ok || !responsePayload || typeof responsePayload !== "object" || !("data" in responsePayload)) {
+      const responsePayload = dataObject(await response.json());
+      const job = responsePayload?.job;
+      if (!response.ok || !isQaAnalysisJob(job)) {
         throw new Error(String(response.status));
       }
-      const result = responsePayload.data;
-      if (!isQaImportResult(result)) throw new Error(String(response.status));
-      setAnalysisResult(result);
       setPersistedAnalyses([]);
-      if (result.conversation) {
-        setActiveConversationId(result.conversation.id);
-        await loadConversations();
-      }
-      if (result.persistence?.status === "unavailable") {
-        setHistoryError("El informe sigue disponible en esta sesión, pero no se pudo guardar en el historial.");
-      } else {
-        setHistoryError("");
-      }
+      setJobEvents([]);
+      lastSequence.current = 0;
+      setActiveJob(job);
+      setActiveJobId(job.id);
+      window.sessionStorage.setItem(jobStorageKey(projectId), job.id);
       setMessages((current) => [...current, {
-        id: `report-${result.analysis.analysisId}`,
-        role: "assistant",
-        text: `Análisis completado: ${result.analysis.findings.length} hallazgos verificables en ${result.repository.inspectedFileCount} archivos inspeccionados.`,
+        id: `job-${job.id}`,
+        role: "user",
+        text: payload.repositoryUrl,
       }]);
-      setRepositoryUrl("");
     } catch (error: unknown) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
       const status = Number(error instanceof Error ? error.message : NaN);
       setImportError(safeApiError(status));
-    } finally {
-      if (importController.current === controller) {
-        importController.current = null;
-        setIsImporting(false);
-      }
+      setIsImporting(false);
     }
   }
 
-  function askAboutAnalysis(event: FormEvent<HTMLFormElement>) {
+  async function askAboutAnalysis(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = question.trim();
-    if (!trimmed || !analysisResult) return;
-    setMessages((current) => [
-      ...current,
-      { id: `question-${Date.now()}`, role: "user", text: trimmed },
-      {
-        id: `answer-${Date.now()}`,
-        role: "assistant",
-        text: answerQaQuestion(trimmed, analysisResult.analysis),
-      },
-    ]);
-    if (activeConversationId && projectId) {
-      void Promise.all([
-        fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "user", body: trimmed }),
-        }),
-        fetch(`/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "assistant", body: answerQaQuestion(trimmed, analysisResult.analysis) }),
-        }),
-      ]).then(() => loadConversations()).catch(() => setHistoryError("La respuesta se mostró en esta sesión, pero no se pudo guardar en el historial."));
+    const analysis = persistedAnalyses[0];
+    if (!trimmed || !analysis || !activeConversationId || !projectId || isAsking) return;
+    setIsAsking(true);
+    setHistoryError("");
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(activeConversationId)}/assistant`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: trimmed, analysisRunId: analysis.id }),
+        },
+      );
+      const payload = dataObject(await response.json());
+      const answer = payload?.answer;
+      const persistedMessages = payload?.messages;
+      if (!response.ok || !isQaAssistantResponse(answer) || !persistedMessages || typeof persistedMessages !== "object") {
+        throw new Error(String(response.status));
+      }
+      const messageData = persistedMessages as Record<string, unknown>;
+      const userMessage = messageData.user;
+      const assistantMessage = messageData.assistant;
+      if (!isConversationMessage(userMessage) || !isConversationMessage(assistantMessage)) {
+        throw new Error("invalid assistant persistence response");
+      }
+      setMessages((current) => [
+        ...current,
+        { id: userMessage.id, role: "user", text: userMessage.body },
+        {
+          id: assistantMessage.id,
+          role: "assistant",
+          text: answer.verified,
+          answer,
+        },
+      ]);
+      setQuestion("");
+      await loadConversations();
+    } catch (error: unknown) {
+      const status = Number(error instanceof Error ? error.message : Number.NaN);
+      setHistoryError(safeApiError(status));
+    } finally {
+      setIsAsking(false);
     }
-    setQuestion("");
   }
 
   return (
-    <main className="qa-app">
+    <main className={`qa-app${sidebarCollapsed ? " qa-app--sidebar-collapsed" : ""}`}>
       <aside className="qa-sidebar" aria-label="Navegación de QA">
         <a className="qa-brand" href="/qa" aria-label="SentinelOps QA, inicio">
           <span className="qa-brand-mark" aria-hidden="true">S</span>
           <span className="qa-brand-name">SentinelOps <small>QA</small></span>
         </a>
+        <button
+          className="qa-sidebar-toggle"
+          type="button"
+          onClick={() => setSidebarCollapsed((current) => !current)}
+          aria-expanded={!sidebarCollapsed}
+          aria-label={sidebarCollapsed ? "Expandir barra lateral" : "Contraer barra lateral"}
+        >
+          {sidebarCollapsed ? "›" : "‹"}
+        </button>
         <nav className="qa-nav">
           <button className="qa-nav-active" type="button" onClick={startNewAnalysis}>Nuevo análisis</button>
           <a href="/knowledge-base">Fuentes técnicas</a>
@@ -609,23 +724,69 @@ export function QaWorkspace() {
         <header className="qa-topbar">
           <div>
             <p className="qa-kicker">{activeConversationId ? "CONVERSACIÓN DE PROYECTO" : "NUEVO ANÁLISIS"} · EVIDENCIA PRIMERO</p>
-            <h1 id="qa-title">{analysisResult ? `Encontré ${analysisResult.analysis.findings.length} hallazgos verificables.` : "Entiende la calidad de tu proyecto sin ejecutar código no confiable."}</h1>
+            <h1 id="qa-title">{activeJob ? "Analizando un repositorio con etapas verificables." : persistedAnalyses[0] ? `Informe QA: ${persistedAnalyses[0].reportSummary.findingCount} hallazgos verificables.` : "Entiende la calidad de tu proyecto sin ejecutar código no confiable."}</h1>
           </div>
           <span className="qa-readonly">Análisis estático · solo lectura</span>
         </header>
+
+        {activeJob ? (
+          <section className="qa-job-progress" aria-labelledby="qa-job-progress-title" aria-live="polite">
+            <header>
+              <div>
+                <p className="qa-kicker">ANÁLISIS EN CURSO · EVENTOS DEL SERVIDOR</p>
+                <h2 id="qa-job-progress-title">{activeJob.status === "queued" ? "En cola" : "Procesando repositorio"}</h2>
+              </div>
+              <span className="qa-source-state">{activeJob.stage.replaceAll("_", " ")}</span>
+            </header>
+            <ol>
+              {jobEvents.map((event) => (
+                <li key={`${event.jobId}:${event.sequence}`}>
+                  <span className={`qa-job-status qa-job-status--${event.status}`} aria-hidden="true" />
+                  <div>
+                    <strong>{event.message}</strong>
+                    {event.filePath ? <code>{event.filePath}</code> : null}
+                    {event.processedFiles !== null || event.selectedFiles !== null ? (
+                      <small>
+                        {event.processedFiles !== null ? `${event.processedFiles} procesados` : ""}
+                        {event.processedFiles !== null && event.selectedFiles !== null ? " · " : ""}
+                        {event.selectedFiles !== null ? `${event.selectedFiles} seleccionados` : ""}
+                      </small>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
 
         <div className="qa-conversation" aria-live="polite">
           {messages.map((message) => (
             <article className={`qa-message qa-message--${message.role}`} key={message.id}>
               <span className="qa-message-role">{message.role === "assistant" ? "SentinelOps QA" : "Tú"}</span>
               <p>{message.text}</p>
+              {message.answer?.interpretation ? (
+                <section className="qa-assistant-interpretation" aria-label="Interpretación no verificada">
+                  <strong>Interpretación / recomendación no verificada</strong>
+                  <p>{message.answer.interpretation}</p>
+                </section>
+              ) : null}
+              {message.answer?.citations.length ? (
+                <ul className="qa-answer-citations" aria-label="Referencias verificadas">
+                  {message.answer.citations.map((citation) => (
+                    <li key={`${citation.findingId}:${citation.contentSha256}`}>
+                      <code>{citation.filePath}:{citation.startLine}–{citation.endLine}</code>
+                      <small>{citation.contentSha256}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {message.answer?.generation.status === "unavailable" ? <p className="qa-evidence-note">La explicación local no estuvo disponible; se conservó la respuesta determinista.</p> : null}
             </article>
           ))}
-          {analysisResult ? <AnalysisReport result={analysisResult} /> : null}
-          {!analysisResult ? persistedAnalyses.map((analysis) => <HistoricalAnalysisReport key={analysis.id} analysis={analysis} />) : null}
+          {persistedAnalyses.map((analysis) => <HistoricalAnalysisReport key={analysis.id} analysis={analysis} />)}
         </div>
 
-        {!analysisResult ? (
+        {!activeJobId ? (
           <form className="qa-import-composer" onSubmit={importRepository}>
             <label htmlFor="qa-repository">Repositorio público de GitHub</label>
             <div>
@@ -644,18 +805,28 @@ export function QaWorkspace() {
             <p>Solo se consulta GitHub mediante su API pública, con límites de tamaño y sin ejecutar scripts, instalaciones ni pruebas.</p>
             {importError ? <p className="qa-import-error" role="alert">{importError}</p> : null}
           </form>
-        ) : (
+        ) : null}
+        {activeConversationId && persistedAnalyses[0] && !activeJobId ? (
           <form className="qa-question-composer" onSubmit={askAboutAnalysis}>
-            <label htmlFor="qa-question">Pregunta sobre este análisis</label>
+            <label htmlFor="qa-question">Pregunta sobre este informe persistido</label>
             <div>
-              <input
+              <textarea
                 id="qa-question"
                 placeholder="Ej.: ¿Qué encontraste y dónde ocurre?"
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                disabled={isAsking}
+                maxLength={2000}
               />
-              <button type="submit" disabled={!question.trim()}>Preguntar</button>
+              <button type="submit" disabled={!question.trim() || isAsking}>{isAsking ? "Consultando…" : "Preguntar"}</button>
             </div>
+            <p>La respuesta se limita a referencias persistidas de este análisis. Shift+Enter añade una línea.</p>
             <div className="qa-question-suggestions" aria-label="Preguntas sugeridas">
               <button type="button" onClick={() => setQuestion("¿Qué encontraste?")}>Qué encontraste</button>
               <button type="button" onClick={() => setQuestion("¿Dónde ocurre?")}>Ver ubicaciones</button>
@@ -663,7 +834,7 @@ export function QaWorkspace() {
               <button type="button" onClick={() => setQuestion("¿Cómo lo corrijo?")}>Cómo corregir</button>
             </div>
           </form>
-        )}
+        ) : null}
       </section>
     </main>
   );

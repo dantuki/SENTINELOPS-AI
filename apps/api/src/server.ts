@@ -14,6 +14,11 @@ import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerQaRoutes } from "./qa-routes.js";
+import { QaAnalysisJobRepository } from "./qa-analysis-job-repository.js";
+import { QaAnalysisJobRunner } from "./qa-analysis-job-runner.js";
+import { registerQaAnalysisJobRoutes } from "./qa-analysis-job-routes.js";
+import { createOptionalLocalQaAssistantProvider } from "./qa-assistant.js";
+import { registerQaAssistantRoutes } from "./qa-assistant-routes.js";
 import { QaConversationRepository } from "./qa-conversation-repository.js";
 import { registerQaConversationRoutes } from "./qa-conversation-routes.js";
 import { registerSourceRoutes } from "./source-routes.js";
@@ -100,9 +105,41 @@ async function main(): Promise<void> {
     ? new QaConversationRepository(postgresPool)
     : undefined;
 
+  const qaAnalysisJobRepository = postgresPool
+    ? new QaAnalysisJobRepository(postgresPool)
+    : undefined;
+
+  const qaAnalysisJobRunner = qaAnalysisJobRepository && sourceRepository && qaConversationRepository
+    ? new QaAnalysisJobRunner(qaAnalysisJobRepository, {
+        sourceStore: sourceRepository,
+        conversationStore: qaConversationRepository,
+        onError: (error, jobId) => app.log.error({ err: error, jobId }, "QA analysis job failed"),
+      })
+    : undefined;
+
+  if (qaAnalysisJobRunner) {
+    try {
+      const interrupted = await qaAnalysisJobRunner.failInterruptedJobs();
+      if (interrupted > 0) {
+        app.log.warn({ interrupted }, "Marked interrupted QA jobs as failed after startup");
+      }
+    } catch (error: unknown) {
+      app.log.error({ err: error }, "Could not reconcile interrupted QA jobs");
+    }
+  }
+
   registerProductRoutes(app, productRepository);
   registerQaRoutes(app, { sourceStore: sourceRepository, conversationStore: qaConversationRepository });
+  registerQaAnalysisJobRoutes(app, {
+    jobStore: qaAnalysisJobRepository,
+    runner: qaAnalysisJobRunner,
+    conversationStore: qaConversationRepository,
+  });
   registerQaConversationRoutes(app, qaConversationRepository);
+  registerQaAssistantRoutes(app, {
+    conversationStore: qaConversationRepository,
+    generationProvider: createOptionalLocalQaAssistantProvider(),
+  });
   registerSourceRoutes(app, sourceRepository);
   registerDocumentRoutes(app, documentRepository);
   registerChunkRoutes(app, chunkRepository);

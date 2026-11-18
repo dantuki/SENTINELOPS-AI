@@ -104,6 +104,72 @@ export interface QaConversationMessage {
   createdAt: string;
 }
 
+export type QaAnalysisJobStatus = "queued" | "running" | "completed" | "failed";
+export type QaAnalysisJobStage =
+  | "queued"
+  | "validating_repository"
+  | "fetching_repository_metadata"
+  | "listing_repository_files"
+  | "selecting_analysis_files"
+  | "reading_manifest"
+  | "reading_source"
+  | "reading_tests"
+  | "reading_documentation"
+  | "analyzing_files"
+  | "verifying_findings"
+  | "preparing_report"
+  | "completed"
+  | "failed";
+
+export interface QaAnalysisJob {
+  id: string;
+  projectId: string;
+  conversationId: string | null;
+  analysisRunId: string | null;
+  repositoryUrl: string;
+  status: QaAnalysisJobStatus;
+  stage: QaAnalysisJobStage;
+  nextSequence: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface QaAnalysisJobEvent {
+  jobId: string;
+  projectId: string;
+  sequence: number;
+  stage: QaAnalysisJobStage;
+  status: QaAnalysisJobStatus;
+  message: string;
+  filePath: string | null;
+  processedFiles: number | null;
+  selectedFiles: number | null;
+  errorCode: string | null;
+  createdAt: string;
+}
+
+export interface QaAssistantResponse {
+  mode: "deterministic" | "generative";
+  verified: string;
+  interpretation?: string;
+  citations: Array<{
+    findingId: string;
+    filePath: string;
+    startLine: number;
+    endLine: number;
+    contentSha256: string;
+  }>;
+  limitations: string[];
+  generation: {
+    status: "not_requested" | "used" | "unavailable" | "rejected";
+    model?: string;
+  };
+}
+
 /**
  * Historical QA data intentionally excludes repository bodies and evidence
  * excerpts. It is enough to keep a report traceable without turning memory
@@ -251,6 +317,69 @@ export function isQaPersistedAnalysis(value: unknown): value is QaPersistedAnaly
     isInventory(value.inventory) &&
     Array.isArray(value.findings) && value.findings.every(isPersistedFinding)
   );
+}
+
+const jobStages: readonly QaAnalysisJobStage[] = [
+  "queued", "validating_repository", "fetching_repository_metadata", "listing_repository_files",
+  "selecting_analysis_files", "reading_manifest", "reading_source", "reading_tests",
+  "reading_documentation", "analyzing_files", "verifying_findings", "preparing_report",
+  "completed", "failed",
+];
+
+function isNullableString(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+export function isQaAnalysisJob(value: unknown): value is QaAnalysisJob {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.projectId === "string" &&
+    isNullableString(value.conversationId) &&
+    isNullableString(value.analysisRunId) &&
+    typeof value.repositoryUrl === "string" &&
+    ["queued", "running", "completed", "failed"].includes(String(value.status)) &&
+    jobStages.includes(value.stage as QaAnalysisJobStage) &&
+    typeof value.nextSequence === "number" &&
+    isNullableString(value.errorCode) &&
+    isNullableString(value.errorMessage) &&
+    typeof value.createdAt === "string" &&
+    isNullableString(value.startedAt) &&
+    isNullableString(value.completedAt) &&
+    typeof value.updatedAt === "string";
+}
+
+export function isQaAnalysisJobEvent(value: unknown): value is QaAnalysisJobEvent {
+  return isRecord(value) &&
+    typeof value.jobId === "string" &&
+    typeof value.projectId === "string" &&
+    typeof value.sequence === "number" &&
+    jobStages.includes(value.stage as QaAnalysisJobStage) &&
+    ["queued", "running", "completed", "failed"].includes(String(value.status)) &&
+    typeof value.message === "string" &&
+    isNullableString(value.filePath) &&
+    (typeof value.processedFiles === "number" || value.processedFiles === null) &&
+    (typeof value.selectedFiles === "number" || value.selectedFiles === null) &&
+    isNullableString(value.errorCode) &&
+    typeof value.createdAt === "string";
+}
+
+export function isQaAssistantResponse(value: unknown): value is QaAssistantResponse {
+  return isRecord(value) &&
+    ["deterministic", "generative"].includes(String(value.mode)) &&
+    typeof value.verified === "string" &&
+    (!("interpretation" in value) || typeof value.interpretation === "string") &&
+    Array.isArray(value.citations) &&
+    value.citations.every((citation) => isRecord(citation) &&
+      typeof citation.findingId === "string" &&
+      typeof citation.filePath === "string" &&
+      typeof citation.startLine === "number" &&
+      typeof citation.endLine === "number" &&
+      typeof citation.contentSha256 === "string",
+    ) &&
+    isStringArray(value.limitations) &&
+    isRecord(value.generation) &&
+    ["not_requested", "used", "unavailable", "rejected"].includes(String(value.generation.status)) &&
+    (!("model" in value.generation) || typeof value.generation.model === "string");
 }
 
 function isConversation(value: unknown): value is QaConversation {

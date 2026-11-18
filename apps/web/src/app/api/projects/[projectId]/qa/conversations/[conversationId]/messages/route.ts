@@ -5,7 +5,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
   if (!isUuid(projectId) || !isUuid(conversationId)) return invalidRequest();
   let body: unknown;
   try { body = await request.json(); } catch { return invalidRequest(); }
-  if (!body || typeof body !== "object" || !("role" in body) || !("body" in body) || !["user", "assistant"].includes(String(body.role)) || typeof body.body !== "string" || !body.body.trim() || body.body.length > 8_000 || Object.keys(body).length !== 2) return invalidRequest();
+  if (!body || typeof body !== "object" || !("role" in body) || !("body" in body) || body.role !== "user" || typeof body.body !== "string" || !body.body.trim() || body.body.length > 8_000 || Object.keys(body).length !== 2) return invalidRequest();
   return forwardProductApi(
     `/api/projects/${encodeURIComponent(projectId)}/qa/conversations/${encodeURIComponent(conversationId)}/messages`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },

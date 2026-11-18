@@ -11,8 +11,13 @@ import {
   importPublicGithubRepository,
   parseGithubRepositoryUrl,
 } from "../src/github-repository-import.js";
+import { answerQaDeterministically, answerQaQuestion } from "../src/qa-assistant.js";
 import { buildApp } from "../src/app.js";
 import { registerQaRoutes } from "../src/qa-routes.js";
+import { registerQaAnalysisJobRoutes } from "../src/qa-analysis-job-routes.js";
+import type { QaAnalysisJobRecord } from "../src/qa-analysis-job-repository.js";
+import type { QaAnalysisJobRunner } from "../src/qa-analysis-job-runner.js";
+import { registerQaAssistantRoutes } from "../src/qa-assistant-routes.js";
 import {
   registerQaConversationRoutes,
   type QaConversationMemoryStore,
@@ -160,6 +165,26 @@ test("public GitHub import uses bounded API content, ignores unsafe paths, and d
   assert.equal(imported.skipped.unsupported, 1);
   assert.match(imported.files.find((item) => item.path === "src/index.ts")?.content ?? "", /export const add/u);
   assert.equal(imported.inventory.testFiles.discovered, 0);
+});
+
+test("GitHub import emits only stages reached by bounded repository operations", async () => {
+  const progress: Array<{ stage: string; filePath?: string; processedFiles?: number }> = [];
+  await importPublicGithubRepository("https://github.com/acme/demo", {
+    fetchImpl: githubFixtureFetch(),
+    onProgress: async (event) => { progress.push(event); },
+  });
+  assert.deepEqual(progress.slice(0, 3).map((event) => event.stage), [
+    "fetching_repository_metadata",
+    "listing_repository_files",
+    "selecting_analysis_files",
+  ]);
+  assert.deepEqual(progress.slice(3).map((event) => event.filePath), [
+    "package.json",
+    "src/index.ts",
+    "README.md",
+  ]);
+  assert.equal(progress.some((event) => event.stage === "analyzing_files"), false);
+  assert.equal(progress[3]?.processedFiles, 0);
 });
 
 test("GitHub QA inventories test paths outside the bounded sample and selects representative categories deterministically", async () => {
@@ -514,6 +539,175 @@ test("disabled GitHub sources cannot be reimported and do not trigger an externa
   }
 });
 
+test("QA assistant answers only from persisted findings and rejects unknown generated citations", async () => {
+  const analysis = {
+    id: "44444444-4444-4444-8444-444444444444",
+    projectId,
+    conversationId: "33333333-3333-4333-8333-333333333333",
+    analysisId: "qa-111111111111111111111111",
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "abc123",
+    status: "completed" as const,
+    completedAt: new Date("2026-01-01T00:00:00.000Z"),
+    reportSummary: {
+      rulesetVersion: "qa-static-v1",
+      detectedStack: ["TypeScript"],
+      inspectedFileCount: 2,
+      findingCount: 1,
+      limitations: ["No se ejecutó código."],
+      testExecution: { status: "not_executed" as const, reason: "Solo análisis estático." },
+    },
+    inventory: inventory(),
+    findings: [{
+      id: "qa-11111111111111111111",
+      ruleId: "qa.security.dynamic_eval",
+      ruleVersion: "qa-static-v1",
+      category: "security" as const,
+      importance: "warning" as const,
+      title: "Se detectó una llamada a eval",
+      description: "El análisis estático encontró una llamada a eval.",
+      recommendation: "Sustituye eval.",
+      evidence: {
+        filePath: "src/index.ts",
+        startLine: 3,
+        endLine: 3,
+        contentSha256: "a".repeat(64),
+      },
+    }],
+  };
+  const deterministic = answerQaDeterministically(analysis, "¿Dónde está el problema?");
+  assert.match(deterministic.verified, /src\/index/u);
+  assert.deepEqual(deterministic.citations.map((citation) => citation.findingId), ["qa-11111111111111111111"]);
+  const fallback = await answerQaQuestion({
+    analysis,
+    question: "Dame una explicación",
+    provider: {
+      explain: async () => ({
+        model: "local-test",
+        interpretation: "No debe conservarse.",
+        citedFindingIds: ["finding-invented"],
+      }),
+    },
+  });
+  assert.equal(fallback.mode, "deterministic");
+  assert.equal(fallback.generation.status, "unavailable");
+});
+
+test("QA assistant route persists server-created messages and remains project scoped", async () => {
+  const security = createTestSecurity();
+  const app = buildApp({ logger: false, securityStore: security.securityStore, securityConfig: security.securityConfig });
+  app.addHook("onRequest", async (request) => security.addTestCredentials(request));
+  const conversation = {
+    id: "33333333-3333-4333-8333-333333333333",
+    projectId,
+    title: "acme/demo",
+    isPinned: false,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    lastMessageAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const analysis = {
+    id: "44444444-4444-4444-8444-444444444444",
+    projectId,
+    conversationId: conversation.id,
+    analysisId: "qa-111111111111111111111111",
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "abc123",
+    status: "completed" as const,
+    completedAt: new Date(),
+    reportSummary: {
+      rulesetVersion: "qa-static-v1", detectedStack: ["TypeScript"], inspectedFileCount: 2, findingCount: 0,
+      limitations: ["No se ejecutó código."], testExecution: { status: "not_executed" as const, reason: "Solo análisis estático." },
+    },
+    inventory: inventory(),
+    findings: [],
+  };
+  const savedRoles: string[] = [];
+  registerQaAssistantRoutes(app, {
+    conversationStore: {
+      getConversation: async (id, conversationId) => id === projectId && conversationId === conversation.id ? conversation : null,
+      listCompletedAnalyses: async () => [analysis],
+      addMessage: async (_project, conversationId, authorUserId, role, body) => {
+        savedRoles.push(`${role}:${authorUserId === null ? "system" : "user"}`);
+        return { id: `message-${savedRoles.length}`, projectId, conversationId, authorUserId, role, body, createdAt: new Date() };
+      },
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/qa/conversations/${conversation.id}/assistant`,
+      payload: { analysisRunId: analysis.id, question: "¿Qué se verificó?" },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(savedRoles, ["user:user", "assistant:system"]);
+    assert.equal((response.json() as { data: { answer: { mode: string } } }).data.answer.mode, "deterministic");
+  } finally {
+    await app.close();
+  }
+});
+
+test("QA job route uses an idempotency key and exposes ordered durable events", async () => {
+  const security = createTestSecurity();
+  const app = buildApp({ logger: false, securityStore: security.securityStore, securityConfig: security.securityConfig });
+  app.addHook("onRequest", async (request) => security.addTestCredentials(request));
+  const job: QaAnalysisJobRecord = {
+    id: "55555555-5555-4555-8555-555555555555",
+    projectId,
+    createdByUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    conversationId: null,
+    analysisRunId: null,
+    idempotencyKey: "66666666-6666-4666-8666-666666666666",
+    repositoryUrl: "https://github.com/acme/demo",
+    status: "queued",
+    stage: "queued",
+    nextSequence: 1,
+    errorCode: null,
+    errorMessage: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    startedAt: null,
+    completedAt: null,
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  const enqueued: string[] = [];
+  registerQaAnalysisJobRoutes(app, {
+    jobStore: {
+      createOrGet: async () => ({ job, created: true }),
+      get: async () => job,
+      listEvents: async () => [{
+        jobId: job.id,
+        projectId,
+        sequence: 1,
+        stage: "queued",
+        status: "queued",
+        message: "El análisis está en cola.",
+        filePath: null,
+        processedFiles: null,
+        selectedFiles: null,
+        errorCode: null,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      }],
+    } as never,
+    runner: { enqueue: (_projectId: string, jobId: string) => { enqueued.push(jobId); } } as QaAnalysisJobRunner,
+  });
+  try {
+    const create = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/qa/jobs`,
+      payload: { repositoryUrl: "https://github.com/acme/demo", idempotencyKey: job.idempotencyKey },
+    });
+    assert.equal(create.statusCode, 202);
+    assert.deepEqual(enqueued, [job.id]);
+    const read = await app.inject({ method: "GET", url: `/api/projects/${projectId}/qa/jobs/${job.id}?afterSequence=0` });
+    assert.equal(read.statusCode, 200);
+    const body = read.json() as { data: { events: Array<{ sequence: number; message: string }> } };
+    assert.deepEqual(body.data.events.map((event) => event.sequence), [1]);
+    assert.equal(body.data.events[0]?.message, "El análisis está en cola.");
+  } finally {
+    await app.close();
+  }
+});
+
 test("QA conversation memory routes retain project scope, pins, and message roles", async () => {
   const security = createTestSecurity();
   const app = buildApp({
@@ -612,6 +806,12 @@ test("QA conversation memory routes retain project scope, pins, and message role
     });
     assert.equal(message.statusCode, 201);
     assert.equal(messages[0]?.authorUserId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const forgedAssistant = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/qa/conversations/${conversation.id}/messages`,
+      payload: { role: "assistant", body: "Resultado inventado" },
+    });
+    assert.equal(forgedAssistant.statusCode, 400);
     const detail = await app.inject({ method: "GET", url: `/api/projects/${projectId}/qa/conversations/${conversation.id}` });
     assert.equal(detail.statusCode, 200);
     assert.equal((detail.json() as { data: { messages: unknown[] } }).data.messages.length, 1);

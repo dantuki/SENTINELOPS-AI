@@ -50,6 +50,23 @@ export interface GithubImportedRepository extends GithubRepositoryReference {
   };
 }
 
+export type GithubImportProgressStage =
+  | "fetching_repository_metadata"
+  | "listing_repository_files"
+  | "selecting_analysis_files"
+  | "reading_manifest"
+  | "reading_source"
+  | "reading_tests"
+  | "reading_documentation";
+
+export interface GithubImportProgress {
+  stage: GithubImportProgressStage;
+  message: string;
+  filePath?: string;
+  processedFiles?: number;
+  selectedFiles?: number;
+}
+
 interface GithubRepositoryMetadata {
   private: boolean;
   default_branch: string;
@@ -219,6 +236,7 @@ async function githubJson(
   url: URL,
   maximumBytes: number,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ status: number; payload: unknown }> {
   let response: Response;
   try {
@@ -230,7 +248,7 @@ async function githubJson(
         "x-github-api-version": "2022-11-28",
       },
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
   } catch (error: unknown) {
     if (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)) {
@@ -308,6 +326,8 @@ export async function importPublicGithubRepository(
   options: {
     fetchImpl?: GithubFetch;
     limits?: Partial<typeof DEFAULT_GITHUB_IMPORT_LIMITS>;
+    signal?: AbortSignal;
+    onProgress?: (progress: GithubImportProgress) => void | Promise<void>;
   } = {},
 ): Promise<GithubImportedRepository> {
   const reference = parseGithubRepositoryUrl(repositoryUrl);
@@ -315,12 +335,20 @@ export async function importPublicGithubRepository(
   const fetchImpl = options.fetchImpl ?? fetch;
   const apiBase = new URL("https://api.github.com/");
   const repositoryPath = `repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.repository)}`;
+  const reportProgress = async (progress: GithubImportProgress): Promise<void> => {
+    await options.onProgress?.(progress);
+  };
 
+  await reportProgress({
+    stage: "fetching_repository_metadata",
+    message: "Consultando los metadatos públicos del repositorio.",
+  });
   const metadataResponse = await githubJson(
     fetchImpl,
     new URL(repositoryPath, apiBase),
     limits.maxJsonBytes,
     limits.timeoutMs,
+    options.signal,
   );
   if (!hasExpectedKeys(metadataResponse.payload, ["private", "default_branch"])) {
     throw new GithubImportError("github_invalid_response");
@@ -331,11 +359,16 @@ export async function importPublicGithubRepository(
     throw new GithubImportError("github_invalid_response");
   }
 
+  await reportProgress({
+    stage: "listing_repository_files",
+    message: "Obteniendo el inventario de archivos del repositorio.",
+  });
   const treeResponse = await githubJson(
     fetchImpl,
     new URL(`${repositoryPath}/git/trees/${encodeURIComponent(metadata.default_branch)}?recursive=1`, apiBase),
     limits.maxJsonBytes,
     limits.timeoutMs,
+    options.signal,
   );
   if (!hasExpectedKeys(treeResponse.payload, ["sha", "tree"])) {
     throw new GithubImportError("github_invalid_response");
@@ -383,6 +416,11 @@ export async function importPublicGithubRepository(
     candidates.set(category, group);
   }
 
+  await reportProgress({
+    stage: "selecting_analysis_files",
+    message: "Seleccionando archivos dentro de los límites de inspección.",
+  });
+
   const files: QaSourceFile[] = [];
   const selectedByCategory: Record<QaInventoryCategory, number> = {
     manifest: 0, test_configuration: 0, source: 0, test: 0, documentation: 0, other: 0,
@@ -402,11 +440,26 @@ export async function importPublicGithubRepository(
       const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
       const contentUrl = new URL(`${repositoryPath}/contents/${encodedPath}`, apiBase);
       contentUrl.searchParams.set("ref", tree.sha);
+      const stageByCategory: Record<QaInventoryCategory, GithubImportProgressStage> = {
+        manifest: "reading_manifest",
+        test_configuration: "reading_tests",
+        test: "reading_tests",
+        source: "reading_source",
+        documentation: "reading_documentation",
+        other: "reading_source",
+      };
+      await reportProgress({
+        stage: stageByCategory[category],
+        message: `Leyendo ${entry.path}.`,
+        filePath: entry.path,
+        processedFiles: files.length,
+      });
       const contentResponse = await githubJson(
         fetchImpl,
         contentUrl,
         Math.min(limits.maxJsonBytes, limits.maxFileBytes * 3),
         limits.timeoutMs,
+        options.signal,
       );
       if (!hasExpectedKeys(contentResponse.payload, ["encoding", "content"])) {
         throw new GithubImportError("github_invalid_response");

@@ -123,6 +123,14 @@ const policies = new Map<string, RoutePolicy>([
     { permission: "project.manage" },
   ],
   [
+    "POST /api/projects/:projectId/qa/jobs",
+    { permission: "project.manage" },
+  ],
+  [
+    "GET /api/projects/:projectId/qa/jobs/:jobId",
+    { permission: "project.read" },
+  ],
+  [
     "GET /api/projects/:projectId/qa/conversations",
     { permission: "project.read" },
   ],
@@ -140,6 +148,10 @@ const policies = new Map<string, RoutePolicy>([
   ],
   [
     "POST /api/projects/:projectId/qa/conversations/:conversationId/messages",
+    { permission: "project.investigate" },
+  ],
+  [
+    "POST /api/projects/:projectId/qa/conversations/:conversationId/assistant",
     { permission: "project.investigate" },
   ],
   ["POST /api/chat", { permission: "chat.use" }],

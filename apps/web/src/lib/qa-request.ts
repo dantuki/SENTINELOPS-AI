@@ -3,6 +3,10 @@ export interface GithubQaRequest {
   conversationId?: string;
 }
 
+export interface GithubQaJobRequest extends GithubQaRequest {
+  idempotencyKey: string;
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export function isGithubQaRequest(value: unknown): value is GithubQaRequest {
@@ -18,5 +22,21 @@ export function isGithubQaRequest(value: unknown): value is GithubQaRequest {
       typeof value.conversationId === "string" &&
       UUID_PATTERN.test(value.conversationId)
     ))
+  );
+}
+
+export function isGithubQaJobRequest(value: unknown): value is GithubQaJobRequest {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "idempotencyKey" in value &&
+    typeof value.idempotencyKey === "string" &&
+    UUID_PATTERN.test(value.idempotencyKey) &&
+    Object.keys(value).every((key) =>
+      key === "repositoryUrl" || key === "conversationId" || key === "idempotencyKey",
+    ) &&
+    isGithubQaRequest(
+      Object.fromEntries(Object.entries(value).filter(([key]) => key !== "idempotencyKey")),
+    )
   );
 }

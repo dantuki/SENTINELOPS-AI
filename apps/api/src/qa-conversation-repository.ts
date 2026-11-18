@@ -283,10 +283,6 @@ export class QaConversationRepository {
           SELECT 1 FROM qa_conversations
           WHERE id = $2::uuid AND project_id = $1::uuid
         )
-        ON CONFLICT (project_id, analysis_id, revision) DO UPDATE
-        SET report_summary = EXCLUDED.report_summary,
-            inventory = EXCLUDED.inventory,
-            completed_at = qa_analysis_runs.completed_at
         RETURNING ${RUN_COLUMNS}
       `, [
         input.projectId,

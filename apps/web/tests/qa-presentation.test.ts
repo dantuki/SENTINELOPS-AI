@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   answerQaQuestion,
+  isQaAnalysisJob,
+  isQaAnalysisJobEvent,
+  isQaAssistantResponse,
   isQaImportResult,
   isQaPersistedAnalysis,
   type QaImportResult,
 } from "../src/lib/qa-presentation.ts";
-import { isGithubQaRequest } from "../src/lib/qa-request.ts";
+import { isGithubQaJobRequest, isGithubQaRequest } from "../src/lib/qa-request.ts";
 
 function reportFixture(): QaImportResult {
   return {
@@ -93,6 +96,51 @@ test("the QA import request has a closed payload shape", () => {
   assert.equal(isGithubQaRequest({ repositoryUrl: "https://github.com/acme/demo", branch: "main" }), false);
   assert.equal(isGithubQaRequest({ repositoryUrl: "https://github.com/acme/demo", conversationId: "//other-project" }), false);
   assert.equal(isGithubQaRequest({ repositoryUrl: "" }), false);
+  assert.equal(isGithubQaJobRequest({
+    repositoryUrl: "https://github.com/acme/demo",
+    idempotencyKey: "33333333-3333-4333-8333-333333333333",
+  }), true);
+  assert.equal(isGithubQaJobRequest({
+    repositoryUrl: "https://github.com/acme/demo",
+    idempotencyKey: "not-a-uuid",
+  }), false);
+  assert.equal(isGithubQaJobRequest({
+    repositoryUrl: "https://github.com/acme/demo",
+    idempotencyKey: "33333333-3333-4333-8333-333333333333",
+    branch: "main",
+  }), false);
+});
+
+test("QA job and assistant presentation contracts reject malformed server state", () => {
+  const job = {
+    id: "11111111-1111-4111-8111-111111111111",
+    projectId: "22222222-2222-4222-8222-222222222222",
+    conversationId: null,
+    analysisRunId: null,
+    repositoryUrl: "https://github.com/acme/demo",
+    status: "running",
+    stage: "reading_source",
+    nextSequence: 4,
+    errorCode: null,
+    errorMessage: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    startedAt: "2026-01-01T00:00:01.000Z",
+    completedAt: null,
+    updatedAt: "2026-01-01T00:00:02.000Z",
+  };
+  assert.equal(isQaAnalysisJob(job), true);
+  assert.equal(isQaAnalysisJob({ ...job, stage: "imagined_stage" }), false);
+  assert.equal(isQaAnalysisJobEvent({
+    jobId: job.id, projectId: job.projectId, sequence: 4, stage: "reading_source", status: "running",
+    message: "Leyendo src/index.ts.", filePath: "src/index.ts", processedFiles: 3, selectedFiles: 8,
+    errorCode: null, createdAt: "2026-01-01T00:00:02.000Z",
+  }), true);
+  assert.equal(isQaAssistantResponse({
+    mode: "deterministic", verified: "Hecho verificado.", interpretation: "no usar",
+    citations: [{ findingId: "qa-1", filePath: "src/index.ts", startLine: 1, endLine: 1, contentSha256: "a".repeat(64) }],
+    limitations: ["Sin cuerpos."], generation: { status: "not_requested" },
+  }), true);
+  assert.equal(isQaAssistantResponse({ mode: "hallucinated" }), false);
 });
 
 test("the QA presentation contract preserves source evidence and rejects malformed data", () => {

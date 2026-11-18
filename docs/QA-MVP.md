@@ -9,8 +9,8 @@ autenticada y autorizada en un proyecto existente:
 2. Introduce una URL canónica de repositorio público de GitHub.
 3. La API obtiene un inventario de metadatos acotado por la API REST pública de GitHub y separa ese inventario del contenido descargado.
 4. Un motor determinista revisa una muestra de archivos de texto seleccionada por categoría.
-5. La interfaz muestra hallazgos con evidencia y permite preguntas locales sobre
-   el informe de esa sesión.
+5. La interfaz muestra eventos persistidos del trabajo, hallazgos con evidencia
+   y permite preguntas sobre informes conservados en la conversación.
 
 Está implementado el análisis de scripts de `package.json`, inventario de rutas de tests,
 material con cabeceras de claves privadas y uso de `eval(...)`. Los hallazgos
@@ -55,7 +55,7 @@ Nunca se ejecutan `npm install`, scripts del repositorio, tests, binarios,
 contenedores ni archivos descargados. El estado de prueba se presenta
 explícitamente como `not_executed`.
 
-## Contrato de producto y conversación
+## Contrato de producto, trabajos y conversación
 
 La ruta protegida es:
 
@@ -69,11 +69,38 @@ Requiere sesión, origen/CSRF para la operación mutante y permiso
 respuesta contiene `source`, una identidad de repositorio y un informe
 estructurado. La web valida su forma antes de renderizarla.
 
-Después de un informe válido, la conversación de QA se resuelve localmente
-sobre ese informe de la sesión. Sólo puede explicar hallazgos, ubicaciones,
-recomendaciones y la ausencia de ejecución. No invoca el endpoint genérico de
-chat ni un modelo generativo; por tanto no produce una conclusión fuera de la
-evidencia estática recibida.
+`POST /api/projects/:projectId/qa/github` se conserva para consumidores
+compatibles, pero la experiencia web usa el contrato asíncrono:
+
+```text
+POST /api/projects/:projectId/qa/jobs
+{ "repositoryUrl": "https://github.com/owner/repository", "idempotencyKey": "uuid" }
+
+GET /api/projects/:projectId/qa/jobs/:jobId?afterSequence=N
+```
+
+La migración `010_add_qa_analysis_jobs.sql` conserva sólo estado, etapas y
+contadores seguros del trabajo. Cada evento está secuenciado y procede de una
+operación real: consulta de metadatos, árbol, archivo leído, motor de reglas,
+verificación de identidad de evidencia o persistencia del informe. No se
+guardan cuerpos de repositorio, prompts ni extractos. Una misma clave de
+idempotencia se limita a `proyecto + usuario`; una clave nueva crea una
+solicitud voluntaria distinta. Un reinicio marca trabajos pendientes como
+fallidos, nunca completados.
+
+La conversación consulta informes persistidos por `analysisRunId` mediante
+`POST /api/projects/:projectId/qa/conversations/:conversationId/assistant`.
+El camino determinista sólo cita hallazgos, ubicación, hash, metadatos y límites
+retenidos. Las respuestas de asistente no se aceptan desde el navegador: el
+servidor persiste el mensaje del usuario y la respuesta de SentinelOps.
+
+La explicación local opcional sólo se habilita si
+`QA_ASSISTANT_GENERATION_ENABLED=true`. Recibe un contexto compacto de
+metadatos verificados, nunca archivos descargados ni extractos, y debe devolver
+JSON con IDs de hallazgos existentes. Una respuesta inválida, sin cita o con
+una cita ajena se descarta y se conserva la respuesta determinista. La
+interpretación generativa se etiqueta como no verificada; no prueba nuevos
+hechos ni resultados de tests.
 
 ## Ejecución local y validación
 
@@ -95,7 +122,8 @@ git diff --check
 
 Las pruebas cubren URL canónica, límites y rutas no seguras, ausencia de
 ejecución, evidencia/redacción, autorización, origen deshabilitado, contrato
-web y respuestas deterministas sobre el informe. Una ejecución E2E contra una
+de trabajos/web, fallback generativo y respuestas deterministas sobre el
+informe. Una ejecución E2E contra una
 instancia autenticada y GitHub público debe registrarse separadamente: las
 pruebas unitarias no demuestran disponibilidad de GitHub ni despliegue.
 
@@ -167,10 +195,11 @@ y [Wompi: información de cuenta independiente](https://wompi.com/assets/downloa
 Browser autenticado
   -> proxy Next.js (validación de payload y sesión)
   -> Fastify (CSRF + RBAC + proyecto)
+  -> trabajo QA persistido y secuenciado
   -> GitHub REST público, lista acotada
-  -> motor estático determinista
-  -> informe con evidencia
-  -> conversación determinista de la sesión
+  -> motor estático determinista y verificación de evidencia
+  -> informe persistido con referencias
+  -> respuesta determinista o explicación local opcional verificada
 ```
 
 El contenido de GitHub es no confiable en cada etapa. No se usa como

@@ -104,18 +104,14 @@ export function registerQaConversationRoutes(
     "/api/projects/:projectId/qa/conversations/:conversationId/messages",
     async (request, reply) => {
       if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
-      if (
-        !request.authUser ||
-        !["user", "assistant"].includes(request.body?.role) ||
-        invalidText(request.body?.body, 8_000)
-      ) {
+      if (!request.authUser || request.body?.role !== "user" || invalidText(request.body?.body, 8_000)) {
         return reply.code(400).send({ error: "Invalid message" });
       }
       const message = await repository.addMessage(
         request.params.projectId,
         request.params.conversationId,
-        request.body.role === "user" ? request.authUser.id : null,
-        request.body.role,
+        request.authUser.id,
+        "user",
         request.body.body.trim(),
       );
       return message

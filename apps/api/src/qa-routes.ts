@@ -1,32 +1,16 @@
 import type { FastifyInstance } from "fastify";
 
+import type { QaAnalysisReport } from "./qa-analysis.js";
 import {
-  analyzeQaProject,
-  type QaAnalysisReport,
-} from "./qa-analysis.js";
-import {
-  GithubImportError,
-  importPublicGithubRepository,
-  parseGithubRepositoryUrl,
-} from "./github-repository-import.js";
-import type {
-  CreateProjectSourceInput,
-  EnsureProjectSourceResult,
-  ProjectSourceRecord,
-} from "./source-repository.js";
-import type {
-  QaConversationRecord,
-  QaConversationRepository,
-} from "./qa-conversation-repository.js";
+  executeQaAnalysis,
+  isGithubImportFailure,
+  isQaAnalysisExecutionError,
+  type QaSourceStore,
+} from "./qa-analysis-execution.js";
+import { GithubImportError } from "./github-repository-import.js";
+import type { QaConversationRecord, QaConversationRepository } from "./qa-conversation-repository.js";
 
-interface QaSourceStore {
-  listForProject(projectId: string): Promise<ProjectSourceRecord[] | null>;
-  ensureForProject(
-    projectId: string,
-    input: CreateProjectSourceInput,
-  ): Promise<EnsureProjectSourceResult | null>;
-  activateIfEnabled(projectId: string, sourceId: string): Promise<boolean>;
-}
+export type { QaSourceStore } from "./qa-analysis-execution.js";
 
 interface QaRouteOptions {
   sourceStore?: QaSourceStore;
@@ -47,14 +31,8 @@ interface ApiError {
 }
 
 interface GithubQaResult {
-  source: {
-    id: string;
-    created: boolean;
-    status: "active";
-  };
-  persistence?: {
-    status: "unavailable";
-  };
+  source: { id: string; created: boolean; status: "active" };
+  persistence?: { status: "unavailable" };
   conversation?: QaConversationRecord;
   repository: {
     url: string;
@@ -64,12 +42,7 @@ interface GithubQaResult {
     revision: string;
     inspectedFileCount: number;
     inventory: QaAnalysisReport["inventory"];
-    skipped: {
-      unsupported: number;
-      tooLarge: number;
-      invalidPath: number;
-      limitReached: number;
-    };
+    skipped: { unsupported: number; tooLarge: number; invalidPath: number; limitReached: number };
   };
   analysis: QaAnalysisReport;
 }
@@ -84,11 +57,7 @@ const apiErrorSchema = {
 const githubImportRequestSchema = {
   type: "object",
   properties: {
-    repositoryUrl: {
-      type: "string",
-      minLength: 1,
-      maxLength: 2048,
-    },
+    repositoryUrl: { type: "string", minLength: 1, maxLength: 2048 },
     conversationId: { type: "string", format: "uuid" },
   },
   required: ["repositoryUrl"],
@@ -97,17 +66,12 @@ const githubImportRequestSchema = {
 
 const githubImportResponseSchema = {
   type: "object",
-  properties: {
-    data: {
-      type: "object",
-      additionalProperties: true,
-    },
-  },
+  properties: { data: { type: "object", additionalProperties: true } },
   required: ["data"],
   additionalProperties: false,
 } as const;
 
-function mapGithubImportError(error: GithubImportError): {
+export function mapGithubImportError(error: GithubImportError): {
   statusCode: 400 | 404 | 409 | 422 | 502 | 503 | 504;
   message: string;
 } {
@@ -129,14 +93,27 @@ function mapGithubImportError(error: GithubImportError): {
   }
 }
 
-/**
- * Registers a project-scoped, public-GitHub-only static QA import.
- * The route intentionally persists source metadata but never imported file bodies.
- */
-export function registerQaRoutes(
-  app: FastifyInstance,
-  options: QaRouteOptions = {},
-): void {
+export function mapQaAnalysisExecutionError(error: { code: string }): {
+  statusCode: 404 | 409 | 422 | 503;
+  message: string;
+} {
+  switch (error.code) {
+    case "project_not_found":
+    case "conversation_not_found":
+      return { statusCode: 404, message: "Resource not found" };
+    case "source_disabled":
+      return { statusCode: 409, message: "El origen de este repositorio está deshabilitado para el proyecto." };
+    case "analysis_integrity_failed":
+      return { statusCode: 422, message: "El análisis no superó la verificación de evidencia." };
+    case "persistence_unavailable":
+      return { statusCode: 503, message: "No se pudo confirmar la persistencia del análisis." };
+    default:
+      return { statusCode: 503, message: "No se pudo completar la importación y el análisis." };
+  }
+}
+
+/** Legacy synchronous endpoint, retained for compatible callers. */
+export function registerQaRoutes(app: FastifyInstance, options: QaRouteOptions = {}): void {
   app.post<{
     Params: { projectId: string };
     Body: GithubImportRequest;
@@ -165,149 +142,35 @@ export function registerQaRoutes(
       },
     },
     async (request, reply) => {
-      if (!options.sourceStore) {
-        return reply.code(503).send({ error: "Persistence unavailable" });
-      }
-
-      let reference;
+      if (!options.sourceStore) return reply.code(503).send({ error: "Persistence unavailable" });
       try {
-        reference = parseGithubRepositoryUrl(request.body.repositoryUrl);
-      } catch (error: unknown) {
-        if (error instanceof GithubImportError) {
-          const mapped = mapGithubImportError(error);
-          return reply.code(mapped.statusCode).send({ error: mapped.message });
-        }
-        return reply.code(400).send({ error: "La URL del repositorio no es válida." });
-      }
-
-      try {
-        const existingSources = await options.sourceStore.listForProject(request.params.projectId);
-        if (existingSources === null) {
-          return reply.code(404).send({ error: "Project not found" });
-        }
-        if (existingSources.some((source) =>
-          source.sourceType === "git_repository" &&
-          source.locator === reference.canonicalUrl &&
-          source.status === "disabled",
-        )) {
-          return reply.code(409).send({ error: "El origen de este repositorio está deshabilitado para el proyecto." });
-        }
-
-        let conversation: QaConversationRecord | null = null;
-        if (request.body.conversationId && options.conversationStore) {
-          conversation = await options.conversationStore.getConversation(
-            request.params.projectId,
-            request.body.conversationId,
-          );
-          if (!conversation) {
-            return reply.code(404).send({ error: "Resource not found" });
-          }
-        }
-
-        const imported = await importPublicGithubRepository(
-          reference.canonicalUrl,
-          { ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) },
-        );
-        const persisted = await options.sourceStore.ensureForProject(
-          request.params.projectId,
-          {
-            sourceType: "git_repository",
-            name: `${imported.owner}/${imported.repository}`,
-            locator: imported.canonicalUrl,
-            metadata: {
-              provider: "github",
-              owner: imported.owner,
-              repository: imported.repository,
-              defaultBranch: imported.defaultBranch,
-              revision: imported.revision,
-              inspectedFileCount: imported.files.length,
-            },
-          },
-        );
-        if (!persisted) {
-          return reply.code(404).send({ error: "Project not found" });
-        }
-        const active = persisted.source.status === "active" || await options.sourceStore.activateIfEnabled(
-          request.params.projectId,
-          persisted.source.id,
-        );
-        if (!active) {
-          return reply.code(409).send({ error: "El origen del repositorio no está habilitado para este proyecto." });
-        }
-
-        const analysis = analyzeQaProject({
-          repositoryUrl: imported.canonicalUrl,
-          revision: imported.revision,
-          files: imported.files,
-          inventory: imported.inventory,
+        const result = await executeQaAnalysis({
+          projectId: request.params.projectId,
+          userId: request.authUser?.id,
+          repositoryUrl: request.body.repositoryUrl,
+          conversationId: request.body.conversationId,
+          sourceStore: options.sourceStore,
+          conversationStore: options.conversationStore,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         });
-        let persistenceUnavailable = !options.conversationStore || !request.authUser;
-        if (options.conversationStore && request.authUser) {
-          try {
-            if (!conversation) {
-              conversation = await options.conversationStore.createConversation(
-                request.params.projectId,
-                request.authUser.id,
-                `${imported.owner}/${imported.repository}`,
-              );
-              if (!conversation) {
-                return reply.code(404).send({ error: "Resource not found" });
-              }
-            }
-            const recordedAnalysis = await options.conversationStore.recordCompletedAnalysis({
-              projectId: request.params.projectId,
-              conversationId: conversation.id,
-              sourceId: persisted.source.id,
-              repositoryUrl: imported.canonicalUrl,
-              revision: imported.revision,
-              report: analysis,
-            });
-            if (!recordedAnalysis) throw new Error("QA analysis persistence was not confirmed");
-            const requestMessage = await options.conversationStore.addMessage(
-              request.params.projectId,
-              conversation.id,
-              request.authUser.id,
-              "user",
-              imported.canonicalUrl,
-            );
-            const reportMessage = await options.conversationStore.addMessage(
-              request.params.projectId,
-              conversation.id,
-              null,
-              "assistant",
-              `Análisis completado: ${analysis.findings.length} hallazgos verificables en ${imported.files.length} archivos inspeccionados.`,
-            );
-            if (!requestMessage || !reportMessage) throw new Error("QA message persistence was not confirmed");
-          } catch {
-            // A completed static report must remain visible, but its memory status
-            // must never be represented as successfully persisted.
-            app.log.warn("QA conversation memory unavailable; returned non-persistent report");
-            conversation = null;
-            persistenceUnavailable = true;
-          }
-        }
-        const result: GithubQaResult = {
-          source: { id: persisted.source.id, created: persisted.created, status: "active" },
-          repository: {
-            url: imported.canonicalUrl,
-            owner: imported.owner,
-            name: imported.repository,
-            defaultBranch: imported.defaultBranch,
-            revision: imported.revision,
-            inspectedFileCount: imported.files.length,
-            inventory: imported.inventory,
-            skipped: imported.skipped,
-          },
-          ...(conversation ? { conversation } : {}),
-          ...(persistenceUnavailable ? { persistence: { status: "unavailable" } } : {}),
-          analysis,
+        const body: GithubQaResult = {
+          source: result.source,
+          repository: result.repository,
+          analysis: result.analysis,
+          ...(result.conversation ? { conversation: result.conversation } : {}),
+          ...(result.persistenceUnavailable ? { persistence: { status: "unavailable" } } : {}),
         };
-        return reply.code(200).send({ data: result });
+        return reply.code(200).send({ data: body });
       } catch (error: unknown) {
-        if (error instanceof GithubImportError) {
+        if (isGithubImportFailure(error)) {
           const mapped = mapGithubImportError(error);
           return reply.code(mapped.statusCode).send({ error: mapped.message });
         }
+        if (isQaAnalysisExecutionError(error)) {
+          const mapped = mapQaAnalysisExecutionError(error);
+          return reply.code(mapped.statusCode).send({ error: mapped.message });
+        }
+        request.log.error({ err: error }, "QA static analysis failed");
         return reply.code(503).send({ error: "No se pudo completar la importación y el análisis." });
       }
     },
