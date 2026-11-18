@@ -5,6 +5,7 @@ import type {
   QaConversationRecord,
   QaPersistedAnalysisRunRecord,
 } from "./qa-conversation-repository.js";
+import { QA_PERSISTENCE_UNAVAILABLE_MESSAGE } from "./qa-persistence.js";
 
 export interface QaConversationMemoryStore {
   listConversations(projectId: string): Promise<QaConversationRecord[]>;
@@ -34,7 +35,7 @@ export function registerQaConversationRoutes(
   app.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/qa/conversations",
     async (request, reply) => {
-      if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!repository) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       return reply.send({ data: await repository.listConversations(request.params.projectId) });
     },
   );
@@ -45,7 +46,7 @@ export function registerQaConversationRoutes(
   }>(
     "/api/projects/:projectId/qa/conversations",
     async (request, reply) => {
-      if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!repository) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       if (invalidText(request.body?.title, 160) || !request.authUser) {
         return reply.code(400).send({ error: "Invalid conversation" });
       }
@@ -65,7 +66,7 @@ export function registerQaConversationRoutes(
   }>(
     "/api/projects/:projectId/qa/conversations/:conversationId",
     async (request, reply) => {
-      if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!repository) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       const conversation = await repository.getConversation(request.params.projectId, request.params.conversationId);
       if (!conversation) return reply.code(404).send({ error: "Resource not found" });
       const [messages, analyses] = await Promise.all([
@@ -82,7 +83,7 @@ export function registerQaConversationRoutes(
   }>(
     "/api/projects/:projectId/qa/conversations/:conversationId",
     async (request, reply) => {
-      if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!repository) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       if (typeof request.body?.isPinned !== "boolean") {
         return reply.code(400).send({ error: "Invalid conversation update" });
       }
@@ -103,7 +104,7 @@ export function registerQaConversationRoutes(
   }>(
     "/api/projects/:projectId/qa/conversations/:conversationId/messages",
     async (request, reply) => {
-      if (!repository) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!repository) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       if (!request.authUser || request.body?.role !== "user" || invalidText(request.body?.body, 8_000)) {
         return reply.code(400).send({ error: "Invalid message" });
       }

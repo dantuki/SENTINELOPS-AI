@@ -5,6 +5,7 @@ import { QaAnalysisJobRepository } from "./qa-analysis-job-repository.js";
 import { QaAnalysisJobRunner } from "./qa-analysis-job-runner.js";
 import type { QaConversationRepository } from "./qa-conversation-repository.js";
 import { mapGithubImportError } from "./qa-routes.js";
+import { QA_PERSISTENCE_UNAVAILABLE_MESSAGE } from "./qa-persistence.js";
 
 interface QaAnalysisJobRouteOptions {
   jobStore?: QaAnalysisJobRepository;
@@ -78,7 +79,7 @@ export function registerQaAnalysisJobRoutes(app: FastifyInstance, options: QaAna
     },
     async (request, reply) => {
       if (!options.jobStore || !options.runner) {
-        return reply.code(503).send({ error: "El servicio de trabajos QA no está disponible." });
+        return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       }
       let canonicalUrl: string;
       try {
@@ -137,7 +138,7 @@ export function registerQaAnalysisJobRoutes(app: FastifyInstance, options: QaAna
       },
     },
     async (request, reply) => {
-      if (!options.jobStore) return reply.code(503).send({ error: "El servicio de trabajos QA no está disponible." });
+      if (!options.jobStore) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       const job = await options.jobStore.get(request.params.projectId, request.params.jobId);
       if (!job) return reply.code(404).send({ error: "Resource not found" });
       const events = await options.jobStore.listEvents(

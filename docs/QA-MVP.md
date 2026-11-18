@@ -109,6 +109,26 @@ producto configurados para el entorno local, ejecute la web y API como parte
 del stack habitual y abra `/qa` tras iniciar sesión. El repositorio público se
 importa sólo después de seleccionar un proyecto autorizado.
 
+La memoria persistente y los trabajos QA requieren que las migraciones 009 y
+010 estén aplicadas en la base de datos del entorno. Al iniciar, la API realiza
+una comprobación **de solo lectura** de las seis tablas requeridas; no ejecuta
+migraciones automáticamente. Si la firma está incompleta, los endpoints de
+conversación y trabajos devuelven un 503 público que pide preparar la memoria
+local, en lugar de intentar importar un repositorio o exponer un error SQL.
+Antes de aplicar esas migraciones en una base existente, un operador debe crear
+y validar un respaldo recuperable y revisar el plan de migración aprobado.
+
+Si las variables de seguridad de desarrollo no están en el entorno de la
+terminal, defínalas sólo para la sesión local antes de iniciar la API; no es
+necesario ni recomendable escribirlas en `.env` para este fin:
+
+```powershell
+$env:NODE_ENV = "development"
+$env:SESSION_COOKIE_SECURE = "false"
+$env:APP_ORIGIN = "http://127.0.0.1:3000"
+npm.cmd run dev --workspace=@sentinelops/api
+```
+
 Las validaciones de código disponibles son:
 
 ```powershell

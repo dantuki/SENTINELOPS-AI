@@ -16,6 +16,7 @@ import {
   type QaPersistedAnalysis,
 } from "@/lib/qa-presentation";
 import { isGithubQaJobRequest } from "@/lib/qa-request";
+import { messageForQaApiFailure } from "@/lib/qa-error";
 import {
   useEffect,
   useMemo,
@@ -98,21 +99,6 @@ function dataObject(value: unknown): Record<string, unknown> | null {
 
 function jobStorageKey(projectId: string): string {
   return `sentinelops:qa-analysis-job:${projectId}`;
-}
-
-function safeApiError(status: number): string {
-  const known: Record<number, string> = {
-    400: "Revisa la URL del repositorio.",
-    401: "Tu sesión ya no es válida. Inicia sesión de nuevo.",
-    403: "No tienes permiso para importar en este proyecto.",
-    404: "No se encontró el proyecto o el repositorio público.",
-    409: "Ese origen no está disponible para este proyecto.",
-    422: "El repositorio no cumple los límites o las reglas de importación segura.",
-    502: "GitHub devolvió una respuesta no válida para el análisis.",
-    503: "El servicio de importación no está disponible temporalmente.",
-    504: "La importación tardó demasiado. Puedes intentarlo de nuevo.",
-  };
-  return known[status] ?? "No se pudo completar el análisis.";
 }
 
 function FindingCard({ finding }: { finding: QaFinding }) {
@@ -407,12 +393,16 @@ export function QaWorkspace() {
       const data = response.ok && payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data)
         ? payload.data.filter(isConversation)
         : null;
-      if (!data) throw new Error("history unavailable");
+      if (!data) {
+        setConversations([]);
+        setHistoryError(messageForQaApiFailure(response.status, payload));
+        return;
+      }
       setConversations(data);
       setHistoryError("");
     } catch {
       setConversations([]);
-      setHistoryError("El historial persistente estará disponible cuando la memoria de QA esté configurada.");
+      setHistoryError("No se pudo cargar el historial persistente.");
     }
   }
 
@@ -494,7 +484,7 @@ export function QaWorkspace() {
       } catch (error: unknown) {
         if (!stopped) {
           const status = Number(error instanceof Error ? error.message : Number.NaN);
-          setImportError(safeApiError(status));
+          setImportError(messageForQaApiFailure(status));
           setIsImporting(false);
         }
       }
@@ -590,10 +580,13 @@ export function QaWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const responsePayload = dataObject(await response.json());
+      const responseBody: unknown = await response.json();
+      const responsePayload = dataObject(responseBody);
       const job = responsePayload?.job;
       if (!response.ok || !isQaAnalysisJob(job)) {
-        throw new Error(String(response.status));
+        setImportError(messageForQaApiFailure(response.status, responseBody));
+        setIsImporting(false);
+        return;
       }
       setPersistedAnalyses([]);
       setJobEvents([]);
@@ -608,7 +601,7 @@ export function QaWorkspace() {
       }]);
     } catch (error: unknown) {
       const status = Number(error instanceof Error ? error.message : NaN);
-      setImportError(safeApiError(status));
+      setImportError(messageForQaApiFailure(status));
       setIsImporting(false);
     }
   }
@@ -629,11 +622,16 @@ export function QaWorkspace() {
           body: JSON.stringify({ question: trimmed, analysisRunId: analysis.id }),
         },
       );
-      const payload = dataObject(await response.json());
+      const responseBody: unknown = await response.json();
+      const payload = dataObject(responseBody);
       const answer = payload?.answer;
       const persistedMessages = payload?.messages;
       if (!response.ok || !isQaAssistantResponse(answer) || !persistedMessages || typeof persistedMessages !== "object") {
-        throw new Error(String(response.status));
+        if (!response.ok) {
+          setHistoryError(messageForQaApiFailure(response.status, responseBody));
+          return;
+        }
+        throw new Error("invalid assistant persistence response");
       }
       const messageData = persistedMessages as Record<string, unknown>;
       const userMessage = messageData.user;
@@ -655,7 +653,7 @@ export function QaWorkspace() {
       await loadConversations();
     } catch (error: unknown) {
       const status = Number(error instanceof Error ? error.message : Number.NaN);
-      setHistoryError(safeApiError(status));
+      setHistoryError(messageForQaApiFailure(status));
     } finally {
       setIsAsking(false);
     }

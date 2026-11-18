@@ -23,6 +23,11 @@ import {
   type QaConversationMemoryStore,
 } from "../src/qa-conversation-routes.js";
 import { QaConversationRepository } from "../src/qa-conversation-repository.js";
+import {
+  isQaPersistenceSchemaReady,
+  QA_PERSISTENCE_TABLES,
+  QA_PERSISTENCE_UNAVAILABLE_MESSAGE,
+} from "../src/qa-persistence.js";
 import type {
   CreateProjectSourceInput,
   EnsureProjectSourceResult,
@@ -31,6 +36,26 @@ import type {
 import { createTestSecurity } from "./security-test-fixture.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
+
+test("QA persistence readiness is a read-only complete-schema check", async () => {
+  let query = "";
+  let values: unknown[] = [];
+  const ready = await isQaPersistenceSchemaReady({
+    query: async (statement, parameters) => {
+      query = statement;
+      values = parameters;
+      return { rows: [{ tables: QA_PERSISTENCE_TABLES.length }] };
+    },
+  });
+  const incomplete = await isQaPersistenceSchemaReady({
+    query: async () => ({ rows: [{ tables: QA_PERSISTENCE_TABLES.length - 1 }] }),
+  });
+
+  assert.equal(ready, true);
+  assert.equal(incomplete, false);
+  assert.match(query, /to_regclass/u);
+  assert.deepEqual(values, [[...QA_PERSISTENCE_TABLES]]);
+});
 
 test("historical analysis lookup qualifies joined run columns and retains both scopes", async () => {
   let statement = "";
@@ -703,6 +728,36 @@ test("QA job route uses an idempotency key and exposes ordered durable events", 
     const body = read.json() as { data: { events: Array<{ sequence: number; message: string }> } };
     assert.deepEqual(body.data.events.map((event) => event.sequence), [1]);
     assert.equal(body.data.events[0]?.message, "El análisis está en cola.");
+  } finally {
+    await app.close();
+  }
+});
+
+test("QA routes report unavailable persistence without attempting an import", async () => {
+  const security = createTestSecurity();
+  const app = buildApp({ logger: false, securityStore: security.securityStore, securityConfig: security.securityConfig });
+  app.addHook("onRequest", async (request) => security.addTestCredentials(request));
+  registerQaAnalysisJobRoutes(app);
+  registerQaConversationRoutes(app);
+
+  try {
+    const conversations = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/qa/conversations`,
+    });
+    assert.equal(conversations.statusCode, 503);
+    assert.equal((conversations.json() as { error: string }).error, QA_PERSISTENCE_UNAVAILABLE_MESSAGE);
+
+    const job = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/qa/jobs`,
+      payload: {
+        repositoryUrl: "https://github.com/acme/demo",
+        idempotencyKey: "66666666-6666-4666-8666-666666666666",
+      },
+    });
+    assert.equal(job.statusCode, 503);
+    assert.equal((job.json() as { error: string }).error, QA_PERSISTENCE_UNAVAILABLE_MESSAGE);
   } finally {
     await app.close();
   }

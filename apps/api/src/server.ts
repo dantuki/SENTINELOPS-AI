@@ -21,6 +21,7 @@ import { createOptionalLocalQaAssistantProvider } from "./qa-assistant.js";
 import { registerQaAssistantRoutes } from "./qa-assistant-routes.js";
 import { QaConversationRepository } from "./qa-conversation-repository.js";
 import { registerQaConversationRoutes } from "./qa-conversation-routes.js";
+import { isQaPersistenceSchemaReady } from "./qa-persistence.js";
 import { registerSourceRoutes } from "./source-routes.js";
 import { ProjectSourceRepository } from "./source-repository.js";
 import { PostgresRetrievalTraceStore } from "./retrieval-trace.js";
@@ -85,6 +86,20 @@ async function main(): Promise<void> {
       : {}),
   });
 
+  let qaPersistenceReady = false;
+  if (postgresPool) {
+    try {
+      qaPersistenceReady = await isQaPersistenceSchemaReady(postgresPool);
+      if (!qaPersistenceReady) {
+        app.log.warn(
+          "QA persistence schema is incomplete; QA memory and durable jobs are unavailable",
+        );
+      }
+    } catch (error: unknown) {
+      app.log.error({ err: error }, "Could not verify QA persistence schema");
+    }
+  }
+
   const productRepository = postgresPool
     ? new ProductRepository(postgresPool)
     : undefined;
@@ -101,11 +116,11 @@ async function main(): Promise<void> {
     ? new DocumentChunkRepository(postgresPool)
     : undefined;
 
-  const qaConversationRepository = postgresPool
+  const qaConversationRepository = postgresPool && qaPersistenceReady
     ? new QaConversationRepository(postgresPool)
     : undefined;
 
-  const qaAnalysisJobRepository = postgresPool
+  const qaAnalysisJobRepository = postgresPool && qaPersistenceReady
     ? new QaAnalysisJobRepository(postgresPool)
     : undefined;
 

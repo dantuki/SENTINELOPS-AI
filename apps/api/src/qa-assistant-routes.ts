@@ -11,6 +11,7 @@ import type {
   QaConversationRepository,
   QaPersistedAnalysisRunRecord,
 } from "./qa-conversation-repository.js";
+import { QA_PERSISTENCE_UNAVAILABLE_MESSAGE } from "./qa-persistence.js";
 
 interface QaAssistantStore {
   getConversation(projectId: string, conversationId: string): Promise<QaConversationRecord | null>;
@@ -56,7 +57,7 @@ export function registerQaAssistantRoutes(app: FastifyInstance, options: QaAssis
     "/api/projects/:projectId/qa/conversations/:conversationId/assistant",
     { schema: { body: requestSchema } },
     async (request, reply) => {
-      if (!store) return reply.code(503).send({ error: "QA memory unavailable" });
+      if (!store) return reply.code(503).send({ error: QA_PERSISTENCE_UNAVAILABLE_MESSAGE });
       if (!request.authUser || !validQuestion(request.body?.question)) {
         return reply.code(400).send({ error: "Invalid question" });
       }

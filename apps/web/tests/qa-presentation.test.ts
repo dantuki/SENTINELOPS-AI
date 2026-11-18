@@ -11,6 +11,33 @@ import {
   type QaImportResult,
 } from "../src/lib/qa-presentation.ts";
 import { isGithubQaJobRequest, isGithubQaRequest } from "../src/lib/qa-request.ts";
+import { messageForQaApiFailure } from "../src/lib/qa-error.ts";
+import { publicProductApiError } from "../src/lib/product-api-error.ts";
+
+const qaPersistenceUnavailable =
+  "La memoria persistente de QA no está preparada en este entorno.";
+
+test("QA error presentation distinguishes missing persistence from GitHub availability", () => {
+  assert.match(
+    messageForQaApiFailure(503, { error: qaPersistenceUnavailable }),
+    /migraciones locales de QA/iu,
+  );
+  assert.equal(
+    messageForQaApiFailure(503, { error: "GitHub no está disponible temporalmente." }),
+    "El servicio de importación no está disponible temporalmente.",
+  );
+});
+
+test("the product proxy keeps documented 503 errors but hides internal 500 details", () => {
+  assert.deepEqual(
+    publicProductApiError(503, { error: qaPersistenceUnavailable }),
+    { status: 503, error: qaPersistenceUnavailable },
+  );
+  assert.deepEqual(
+    publicProductApiError(500, { error: 'relation "qa_conversations" does not exist' }),
+    { status: 503, error: "El servicio de investigación no está disponible." },
+  );
+});
 
 function reportFixture(): QaImportResult {
   return {

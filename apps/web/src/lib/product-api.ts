@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { publicProductApiError } from "./product-api-error";
 
 const PRODUCT_API_URL =
   process.env.PRODUCT_API_URL ?? "http://127.0.0.1:3001";
@@ -60,7 +61,7 @@ export async function forwardProductApi(
     });
 
     if (!response.ok) {
-      const error = publicError(response.status);
+      const error = await publicError(response);
       forwardSetCookies(response, error);
       return error;
     }
@@ -82,7 +83,7 @@ export async function forwardProductApi(
     try {
       payload = await response.json();
     } catch {
-      const error = publicError(502);
+      const error = publicErrorForStatus(502);
       forwardSetCookies(response, error);
       return error;
     }
@@ -92,7 +93,7 @@ export async function forwardProductApi(
       headers: responseHeaders,
     });
   } catch (error: unknown) {
-    return publicError(
+    return publicErrorForStatus(
       error instanceof Error &&
         ["AbortError", "TimeoutError"].includes(error.name)
         ? 504
@@ -128,41 +129,23 @@ function forwardSetCookies(
   }
 }
 
-function publicError(status: number): NextResponse {
-  const mappedStatus =
-    status === 400 ||
-    status === 401 ||
-    status === 403 ||
-    status === 404 ||
-    status === 409 ||
-    status === 413 ||
-    status === 415 ||
-    status === 422 ||
-    status === 429 ||
-    status === 502 ||
-    status === 504
-      ? status
-      : 503;
+async function publicError(response: Response): Promise<NextResponse> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    // The mapped public message remains the safe fallback.
+  }
 
-  const messages: Record<number, string> = {
-    400: "Revisa los datos de la solicitud.",
-    401: "Debes iniciar sesión para continuar.",
-    403: "No tienes permiso para realizar esta operación.",
-    404: "No se encontró el recurso solicitado.",
-    409: "El documento ya se está procesando o necesita una acción de reintento.",
-    413: "El archivo supera el límite de tamaño permitido.",
-    415: "Este tipo de archivo no está permitido.",
-    422: "El archivo no pasó la validación de contenido.",
-    429: "Hay demasiados intentos. Espera antes de volver a intentar.",
-    502: "El servicio devolvió una respuesta no válida.",
-    503: "El servicio de investigación no está disponible.",
-    504: "La investigación tardó demasiado. Puedes intentarlo de nuevo.",
-  };
+  return publicErrorForStatus(response.status, payload);
+}
 
+function publicErrorForStatus(status: number, payload?: unknown): NextResponse {
+  const error = publicProductApiError(status, payload);
   return NextResponse.json(
-    { error: messages[mappedStatus] },
+    { error: error.error },
     {
-      status: mappedStatus,
+      status: error.status,
       headers: { "Cache-Control": "no-store" },
     },
   );
