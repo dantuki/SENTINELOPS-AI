@@ -3,6 +3,7 @@ import {
   analyzeRepositoryCode,
   findDynamicEvalCalls,
   type QaCodeIntelligenceReport,
+  type QaPythonAstFileMetrics,
 } from "./code-intelligence.js";
 
 export const QA_RULESET_VERSION = "qa-static-v2";
@@ -75,6 +76,7 @@ export interface QaAnalysisInput {
   revision: string;
   files: QaSourceFile[];
   inventory: QaRepositoryInventory;
+  pythonMetrics?: QaPythonAstFileMetrics[];
 }
 
 export interface QaAnalysisReport {
@@ -187,12 +189,13 @@ function hasDeclaredScript(value: unknown, scriptName: string): boolean {
 export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
   const files = [...input.files].sort((left, right) => comparePaths(left.path, right.path));
   const findings: QaFinding[] = [];
-  const codeIntelligence = analyzeRepositoryCode(files);
+  const codeIntelligence = analyzeRepositoryCode(files, input.pythonMetrics);
   const checksPerformed = [
     "Inventario de metadatos y selección acotada por categorías",
     "Detección de stack mediante manifiestos y extensiones",
     "Configuración declarada de pruebas y lint",
     "Patrones estáticos de claves privadas y llamadas dinámicas con AST en TypeScript/JavaScript",
+    "Estructura Python mediante AST estándar cuando el servicio interno acotado está disponible",
   ];
   const packageFile = files.find((file) => file.path === "package.json");
 
@@ -263,6 +266,72 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
         recommendation: "Sustituye eval por una alternativa con datos y operaciones permitidas explícitamente, o documenta el aislamiento aplicable.",
         evidence: evidenceFor(file, evalCall.startLine),
       }));
+    }
+  }
+
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+  for (const codeFile of codeIntelligence.analyzedFiles) {
+    const source = filesByPath.get(codeFile.path);
+    if (!source) continue;
+    if (codeFile.status === "syntax_error") {
+      findings.push(finding({
+        ruleId: "qa.quality.syntax_error",
+        category: "quality",
+        importance: "warning",
+        title: "El archivo tiene un error de sintaxis",
+        description: "El parser estructural no pudo construir un árbol completo para este archivo inspeccionado.",
+        whyItMatters: "El análisis posterior de símbolos y relaciones puede estar incompleto; no se infiere que el error se manifieste en producción.",
+        recommendation: "Corrige la sintaxis señalada por las herramientas del lenguaje y vuelve a analizar la revisión.",
+        evidence: evidenceFor(source, 1),
+      }));
+    }
+    for (const relation of codeFile.relations) {
+      if (codeFile.language !== "python" || relation.kind !== "calls") continue;
+      if (relation.to === "eval" || relation.to === "exec") {
+        findings.push(finding({
+          ruleId: relation.to === "eval" ? "qa.security.python_eval" : "qa.security.python_exec",
+          category: "security",
+          importance: "warning",
+          title: `Se detectó una llamada Python a ${relation.to}`,
+          description: `El AST encontró una llamada directa a ${relation.to} en el archivo indicado. No demuestra que el argumento sea controlable por un atacante.`,
+          whyItMatters: "La evaluación dinámica puede ejecutar texto como código si se combina con entradas no confiables.",
+          recommendation: `Evita ${relation.to} sobre texto no confiable o documenta y valida explícitamente el aislamiento y los datos permitidos.`,
+          evidence: evidenceFor(source, relation.startLine),
+        }));
+      }
+      if (
+        /^subprocess\.(?:run|call|check_call|check_output|Popen)$/u.test(relation.to) &&
+        relation.callSafety?.shellTrue === true &&
+        relation.callSafety.commandIsConstant === false
+      ) {
+        findings.push(finding({
+          ruleId: "qa.security.python_shell_true_nonliteral",
+          category: "security",
+          importance: "warning",
+          title: "subprocess usa shell=True con un comando no literal",
+          description: "El AST observó shell=True y un primer argumento que no es un literal de cadena. No demuestra explotabilidad ni origen no confiable del valor.",
+          whyItMatters: "Un comando no literal junto con un shell amplía la superficie de inyección cuando ese valor puede estar influido por entradas externas.",
+          recommendation: "Evita shell=True; si es indispensable, usa una lista de argumentos y valida el origen y formato del comando antes de ejecutarlo.",
+          evidence: evidenceFor(source, relation.startLine),
+        }));
+      }
+    }
+    for (const symbol of codeFile.symbols) {
+      if (
+        (symbol.kind === "function" || symbol.kind === "async_function" || symbol.kind === "method") &&
+        (symbol.cyclomaticComplexity ?? 0) >= 10
+      ) {
+        findings.push(finding({
+          ruleId: "qa.quality.high_cyclomatic_complexity",
+          category: "quality",
+          importance: "warning",
+          title: "Función con complejidad ciclomática alta",
+          description: `${symbol.qualifiedName ?? symbol.name} tiene complejidad ciclomática ${symbol.cyclomaticComplexity} bajo el modelo sintáctico documentado (umbral 10).`,
+          whyItMatters: "Más rutas sintácticas pueden hacer más difícil revisar y cubrir el comportamiento, pero no prueban un defecto.",
+          recommendation: "Considera separar decisiones independientes y añadir pruebas para las rutas críticas antes de modificar el comportamiento.",
+          evidence: evidenceFor(source, symbol.startLine),
+        }));
+      }
     }
   }
 

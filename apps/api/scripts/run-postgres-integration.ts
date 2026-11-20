@@ -3,8 +3,10 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import net from "node:net";
 import { Pool } from "pg";
 
 import {
@@ -22,6 +24,7 @@ import {
   TerminationController,
   type CommandResult,
 } from "./inc001-runner-lifecycle.js";
+import { ManagedProcess } from "./managed-process.js";
 
 const image = POSTGRES_IMAGE;
 const database = `sentinelops_phase31_isolation_${Date.now()}`;
@@ -31,7 +34,15 @@ const runId = randomBytes(16).toString("hex");
 const containerName = `sentinelops-postgres-integration-${runId}`;
 const cidfilePath = resolve(tmpdir(), `${containerName}.cid`);
 const apiDirectory = fileURLToPath(new URL("../", import.meta.url));
-const migrations = ["001", "002", "003", "004", "005", "006", "007", "008"];
+const repositoryRoot = resolve(apiDirectory, "..", "..");
+const orchestratorDirectory = resolve(repositoryRoot, "services", "ai-orchestrator");
+const pythonExecutable = resolve(
+  orchestratorDirectory,
+  ".venv",
+  process.platform === "win32" ? "Scripts" : "bin",
+  process.platform === "win32" ? "python.exe" : "python",
+);
+const migrations = ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"];
 const termination = new TerminationController();
 
 function throwIfTerminated(): void {
@@ -94,6 +105,41 @@ function docker(args: string[]): string {
 
 function runDocker(args: string[]): CommandResult {
   return runCommand("docker", args);
+}
+
+function findFreeLoopbackPort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error || port === 0) reject(error ?? new Error("Could not select a loopback port."));
+        else resolvePort(port);
+      });
+    });
+  });
+}
+
+async function waitForPythonAstService(process_: ManagedProcess, port: number): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (process_.exitCode !== undefined) {
+      throw new Error(`Temporary Python AST service exited before health check (exit ${process_.exitCode}).`);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (response.ok) return;
+    } catch {
+      // The service may still be starting. The process state is checked above.
+    }
+    await delay(200);
+  }
+  throw new Error("Temporary Python AST service did not become healthy within 30 seconds.");
 }
 
 async function waitForPostgres(port: number): Promise<void> {
@@ -170,7 +216,7 @@ async function verifyMigrations(port: number): Promise<void> {
       applied.rows.map((row) => row.version).join(",") !==
       migrations.join(",")
     ) {
-      throw new Error("Expected migration versions 001 through 008.");
+      throw new Error("Expected migration versions 001 through 010.");
     }
     const tables = await pool.query<{ missing: string[] }>(
       `
@@ -195,6 +241,12 @@ async function verifyMigrations(port: number): Promise<void> {
         "auth_login_rate_limits",
         "retrieval_events",
         "retrieval_event_items",
+        "qa_conversations",
+        "qa_conversation_messages",
+        "qa_analysis_runs",
+        "qa_analysis_findings",
+        "qa_analysis_jobs",
+        "qa_analysis_job_events",
       ]],
     );
     if (tables.rows[0]?.missing?.length) {
@@ -257,6 +309,8 @@ async function main(): Promise<void> {
   );
   let operationError: unknown = null;
   let cidfile: string | null = null;
+  let pythonAstService: ManagedProcess | null = null;
+  let pythonAstStopState: "stopped" | "failed" | "unknown" | null = null;
   let cleanupResult: ReturnType<typeof cleanupTemporaryPostgresContainer> | null =
     null;
   try {
@@ -315,7 +369,49 @@ async function main(): Promise<void> {
     });
     await waitForPostgres(port);
 
-    const env = migrationEnvironment(port);
+    const serviceKey = randomBytes(32).toString("base64url");
+    const pythonAstPort = await findFreeLoopbackPort();
+    if (!existsSync(pythonExecutable)) {
+      throw new Error("The isolated Python AST service virtual environment is unavailable.");
+    }
+    pythonAstService = new ManagedProcess(
+      "python-ast-service",
+      pythonExecutable,
+      [
+        "-m",
+        "uvicorn",
+        "sentinelops_ai_orchestrator.app:app",
+        "--app-dir",
+        "src",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(pythonAstPort),
+      ],
+      {
+        cwd: orchestratorDirectory,
+        env: {
+          PATH: process.env.PATH,
+          SystemRoot: process.env.SystemRoot,
+          NODE_ENV: "test",
+          // The orchestrator deliberately accepts only configured runtime
+          // environments. This is a process-local development value, never a
+          // mutation of the user's normal environment or .env.
+          SENTINELOPS_ENV: "development",
+          AI_ORCHESTRATOR_API_KEY: serviceKey,
+          PYTHONDONTWRITEBYTECODE: "1",
+        },
+      },
+      [serviceKey],
+    );
+    await waitForPythonAstService(pythonAstService, pythonAstPort);
+
+    const env = {
+      ...migrationEnvironment(port),
+      AI_ORCHESTRATOR_URL: `http://127.0.0.1:${pythonAstPort}`,
+      AI_ORCHESTRATOR_API_KEY: serviceKey,
+      SENTINELOPS_ENV: "development",
+    };
     const node = process.execPath;
     const migrate = () =>
       run(node, ["--experimental-transform-types", "--import=./scripts/node-ts-register.mjs", "src/migrate.ts"], {
@@ -341,11 +437,31 @@ async function main(): Promise<void> {
       ],
       { cwd: apiDirectory, env, printOutput: true },
     );
+    run(
+      node,
+      [
+        "--experimental-transform-types",
+        "--import=./scripts/node-ts-register.mjs",
+        "--test",
+        "--test-concurrency=1",
+        "--test-reporter=spec",
+        "tests/qa-code-intelligence.integration.test.ts",
+      ],
+      { cwd: apiDirectory, env, printOutput: true },
+    );
     throwIfTerminated();
     console.log("Isolated PostgreSQL migrations and integration tests passed.");
   } catch (error: unknown) {
     operationError = error;
   } finally {
+    if (pythonAstService) {
+      pythonAstStopState = await pythonAstService.stop();
+      if (pythonAstStopState !== "stopped") {
+        operationError ??= new Error(
+          `Temporary Python AST service cleanup was not verified (${pythonAstStopState}).`,
+        );
+      }
+    }
     if (cidfile === null) {
       try {
         cidfile = (await readFile(cidfilePath, "utf8")).trim();

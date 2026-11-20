@@ -41,8 +41,9 @@ export interface QaAnalysisReport {
       parsedFileCount: number;
       symbolCount: number;
       relationCount: number;
-      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      languageCounts: { javascript: number; typescript: number; python: number; unsupported: number };
       parseDiagnosticCount: number;
+      unavailablePythonFileCount: number;
     };
   };
   limitations: string[];
@@ -211,8 +212,9 @@ export interface QaPersistedAnalysis {
       parsedFileCount: number;
       symbolCount: number;
       relationCount: number;
-      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      languageCounts: { javascript: number; typescript: number; python?: number; unsupported: number };
       parseDiagnosticCount: number;
+      unavailablePythonFileCount?: number;
     };
     limitations: string[];
     testExecution: {
@@ -259,7 +261,8 @@ function isCodeIntelligenceSummary(value: unknown): boolean {
     ) &&
     ["javascript", "typescript", "unsupported"].every(
       (key) => typeof languageCounts[key] === "number",
-    )
+    ) &&
+    (!("python" in languageCounts) || typeof languageCounts.python === "number")
   );
 }
 

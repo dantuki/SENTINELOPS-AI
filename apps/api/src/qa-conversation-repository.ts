@@ -61,14 +61,70 @@ export interface QaPersistedAnalysisRunRecord extends QaAnalysisRunRecord {
       parsedFileCount: number;
       symbolCount: number;
       relationCount: number;
-      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      languageCounts: { javascript: number; typescript: number; python?: number; unsupported: number };
       parseDiagnosticCount: number;
+      unavailablePythonFileCount?: number;
+      structuralIndex?: QaPersistedStructuralIndex;
     };
     limitations: string[];
     testExecution: QaAnalysisReport["testExecution"];
   };
   inventory: QaAnalysisReport["inventory"];
   findings: QaPersistedFindingRecord[];
+}
+
+/**
+ * Bounded structural facts retained in existing JSONB report metadata. It
+ * contains identities and locations, never imported repository bodies,
+ * excerpts, tokens, or executable text.
+ */
+export interface QaPersistedStructuralIndex {
+  files: Array<{
+    path: string;
+    contentSha256: string;
+    language: string;
+    status: string;
+    parseDiagnostics: number;
+    constructCounts?: {
+      if: number;
+      for: number;
+      asyncFor: number;
+      while: number;
+      try: number;
+      except: number;
+      with: number;
+      asyncWith: number;
+      return: number;
+      raise: number;
+      lambda: number;
+      decorator: number;
+    };
+    symbols: Array<{
+      name: string;
+      qualifiedName?: string;
+      kind: string;
+      startLine: number;
+      endLine: number;
+      parameterCount: number | null;
+      cyclomaticComplexity?: number | null;
+    }>;
+    relations: Array<{
+      kind: string;
+      from: string;
+      to: string;
+      startLine: number;
+      resolved: boolean;
+      resolution: "resolved" | "partially_resolved" | "unresolved";
+    }>;
+  }>;
+  documentationClaims: Array<{
+    id: string;
+    kind: string;
+    documentedValue: string;
+    readmeLine: number;
+    status: string;
+    observedPath?: string;
+  }>;
 }
 
 const CONVERSATION_COLUMNS = `
@@ -93,6 +149,55 @@ const QUALIFIED_RUN_COLUMNS = `
   qa_analysis_runs.completed_at AS "completedAt"
 `;
 
+function compactStructuralIndex(report: QaAnalysisReport): QaPersistedStructuralIndex {
+  let remainingSymbols = 256;
+  let remainingRelations = 512;
+  const files = report.codeIntelligence.analyzedFiles.slice(0, 96).map((file) => {
+    const symbols = file.symbols.slice(0, Math.max(0, remainingSymbols)).map((symbol) => ({
+      name: symbol.name,
+      ...(symbol.qualifiedName ? { qualifiedName: symbol.qualifiedName } : {}),
+      kind: symbol.kind,
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      parameterCount: symbol.parameterCount,
+      ...(symbol.cyclomaticComplexity !== undefined ? { cyclomaticComplexity: symbol.cyclomaticComplexity } : {}),
+    }));
+    remainingSymbols -= symbols.length;
+    const relations = file.relations.slice(0, Math.max(0, remainingRelations)).map((relation) => ({
+      kind: relation.kind,
+      from: relation.from,
+      to: relation.to,
+      startLine: relation.startLine,
+      resolved: relation.resolved,
+      resolution: relation.resolution,
+    }));
+    remainingRelations -= relations.length;
+    return {
+      path: file.path,
+      contentSha256: file.contentSha256,
+      language: file.language,
+      status: file.status,
+      parseDiagnostics: file.parseDiagnostics,
+      ...(file.constructCounts ? { constructCounts: file.constructCounts } : {}),
+      symbols,
+      relations,
+    };
+  });
+  return {
+    files,
+    documentationClaims: report.codeIntelligence.readmes
+      .flatMap((readme) => readme.claims.map((claim) => ({
+        id: claim.id,
+        kind: claim.kind,
+        documentedValue: claim.documentedValue,
+        readmeLine: claim.readmeLine,
+        status: claim.status,
+        ...(claim.observedPath ? { observedPath: claim.observedPath } : {}),
+      })))
+      .slice(0, 96),
+  };
+}
+
 function safeReportSummary(report: QaAnalysisReport): Record<string, unknown> {
   return {
     rulesetVersion: report.rulesetVersion,
@@ -102,6 +207,7 @@ function safeReportSummary(report: QaAnalysisReport): Record<string, unknown> {
     codeIntelligence: {
       version: report.codeIntelligence.version,
       ...report.codeIntelligence.summary,
+      structuralIndex: compactStructuralIndex(report),
     },
     limitations: report.limitations,
     testExecution: report.testExecution,

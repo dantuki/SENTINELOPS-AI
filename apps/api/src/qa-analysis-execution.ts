@@ -1,4 +1,5 @@
 import { analyzeQaProject, type QaAnalysisReport } from "./qa-analysis.js";
+import { requestPythonAstMetrics } from "./python-code-intelligence-client.js";
 import {
   GithubImportError,
   importPublicGithubRepository,
@@ -185,11 +186,13 @@ export async function executeQaAnalysis(input: {
     message: "Aplicando las reglas QA estáticas a los archivos seleccionados.",
     selectedFiles: imported.files.length,
   });
+  const pythonMetrics = await requestPythonAstMetrics(imported.files);
   const analysis = analyzeQaProject({
     repositoryUrl: imported.canonicalUrl,
     revision: imported.revision,
     files: imported.files,
     inventory: imported.inventory,
+    pythonMetrics,
   });
   await input.onProgress?.({
     stage: "verifying_findings",

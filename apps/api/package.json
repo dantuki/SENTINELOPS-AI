@@ -14,6 +14,7 @@
     "evaluate:inc001:isolated": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/run-inc001-evaluation.ts",
     "evaluate:inc001:deterministic": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/run-inc001-evaluation.ts --deterministic",
     "benchmark:model-capability": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/model-capability-benchmark.ts",
+    "benchmark:code-intelligence": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs scripts/qa-code-intelligence-benchmark.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
     "test": "node --experimental-transform-types --import=./scripts/node-ts-register.mjs --test tests/app.test.ts tests/ingestion.test.ts tests/inc001-evaluation.test.ts tests/auth-security.test.ts tests/inc001-isolated-runner.test.ts tests/verified-fact-engine.test.ts tests/deterministic-investigation.test.ts tests/qa-analysis.test.ts",

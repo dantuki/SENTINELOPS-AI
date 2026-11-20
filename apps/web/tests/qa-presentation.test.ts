@@ -188,6 +188,24 @@ test("the QA presentation contract preserves source evidence and rejects malform
   assert.equal(isQaImportResult({ ...fixture, persistence: { status: "persisted" } }), false);
   assert.equal(isQaImportResult({
     ...fixture,
+    analysis: {
+      ...fixture.analysis,
+      codeIntelligence: {
+        version: "qa-code-intelligence-v2",
+        summary: {
+          analyzedFileCount: 2,
+          parsedFileCount: 1,
+          symbolCount: 3,
+          relationCount: 2,
+          languageCounts: { javascript: 0, typescript: 0, python: 1, unsupported: 0 },
+          parseDiagnosticCount: 0,
+          unavailablePythonFileCount: 1,
+        },
+      },
+    },
+  }), true);
+  assert.equal(isQaImportResult({
+    ...fixture,
     analysis: { ...fixture.analysis, codeIntelligence: { version: "qa-code-intelligence-v1", summary: { parsedFileCount: "not-a-number" } } },
   }), false);
   assert.equal(isQaImportResult({ ...fixture, analysis: { ...fixture.analysis, inventory: { ...fixture.analysis.inventory, testFiles: {} as unknown as { discovered: number; selected: number } } } }), false);

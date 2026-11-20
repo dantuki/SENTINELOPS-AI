@@ -197,7 +197,12 @@ function HistoricalAnalysisReport({ analysis }: { analysis: QaPersistedAnalysis 
         {analysis.reportSummary.codeIntelligence ? (
           <div>
             <dt>Estructura estática</dt>
-            <dd>{analysis.reportSummary.codeIntelligence.parsedFileCount} archivos AST · {analysis.reportSummary.codeIntelligence.symbolCount} símbolos</dd>
+            <dd>
+              {analysis.reportSummary.codeIntelligence.parsedFileCount} archivos AST · {analysis.reportSummary.codeIntelligence.symbolCount} símbolos
+              {(analysis.reportSummary.codeIntelligence.unavailablePythonFileCount ?? 0) > 0
+                ? ` · ${analysis.reportSummary.codeIntelligence.unavailablePythonFileCount} Python sin AST disponible`
+                : ""}
+            </dd>
           </div>
         ) : null}
       </dl>
@@ -260,7 +265,12 @@ function AnalysisReport({ result }: { result: QaImportResult }) {
         {analysis.codeIntelligence ? (
           <div>
             <dt>Estructura estática</dt>
-            <dd>{analysis.codeIntelligence.summary.parsedFileCount} archivos AST · {analysis.codeIntelligence.summary.symbolCount} símbolos · {analysis.codeIntelligence.summary.relationCount} relaciones sintácticas</dd>
+            <dd>
+              {analysis.codeIntelligence.summary.parsedFileCount} archivos AST · {analysis.codeIntelligence.summary.symbolCount} símbolos · {analysis.codeIntelligence.summary.relationCount} relaciones sintácticas
+              {analysis.codeIntelligence.summary.unavailablePythonFileCount > 0
+                ? ` · ${analysis.codeIntelligence.summary.unavailablePythonFileCount} Python sin AST disponible`
+                : ""}
+            </dd>
           </div>
         ) : null}
       </dl>

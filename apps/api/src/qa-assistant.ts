@@ -69,6 +69,64 @@ function reportFacts(analysis: QaPersistedAnalysisRunRecord): string {
   ].join(" ");
 }
 
+function structuralAnswer(
+  analysis: QaPersistedAnalysisRunRecord,
+  question: string,
+): string | null {
+  const index = analysis.reportSummary.codeIntelligence?.structuralIndex;
+  if (!index) return null;
+  const normalized = question.toLocaleLowerCase("es");
+  const references = index.files.map((file) => `${file.path}:${file.contentSha256.slice(0, 12)}`);
+  if (/no .*inspeccion|sin .*analiz|no .*analiz/u.test(normalized)) {
+    const unavailable = index.files.filter((file) => file.status !== "parsed");
+    return unavailable.length > 0
+      ? `Archivos sin AST disponible: ${unavailable.map((file) => `${file.path} (${file.status})`).join(", ")}.`
+      : "El índice persistido no registra archivos seleccionados sin AST; esto no demuestra que todo el repositorio haya sido seleccionado o analizado.";
+  }
+  if (/readme|documentaci[oó]n|corrobor/u.test(normalized)) {
+    if (index.documentationClaims.length === 0) return "El índice persistido no contiene afirmaciones estructuradas de README para esta muestra.";
+    return `Afirmaciones documentadas: ${index.documentationClaims.slice(0, 12).map((claim) =>
+      `${claim.kind}=${claim.documentedValue} (README línea ${claim.readmeLine}: ${claim.status}${claim.observedPath ? `; evidencia ${claim.observedPath}` : ""})`,
+    ).join("; ")}.`;
+  }
+  if (/dependenc|import/u.test(normalized)) {
+    const imports = index.files.flatMap((file) => file.relations
+      .filter((relation) => relation.kind === "imports" || relation.kind === "from_imports")
+      .map((relation) => `${file.path}:${relation.startLine} → ${relation.to}`));
+    return imports.length > 0
+      ? `Dependencias sintácticas no resueltas: ${imports.slice(0, 20).join("; ")}. No prueban carga ni ejecución en tiempo de ejecución.`
+      : "No hay relaciones de importación retenidas en el índice estructural de esta muestra.";
+  }
+  if (/entry.?point|punto.*entrada|exporta/u.test(normalized)) {
+    const exports = index.files.flatMap((file) => file.relations
+      .filter((relation) => relation.kind === "exports" && relation.resolution === "resolved")
+      .map((relation) => `${file.path}:${relation.startLine} → ${relation.to}`));
+    return exports.length > 0
+      ? `Exportaciones o puntos de entrada declarados sintácticamente: ${exports.slice(0, 20).join("; ")}. Esta señal no prueba que sean invocados en producción.`
+      : "El índice no retuvo exportaciones explícitas o puntos de entrada sintácticos para esta muestra; no se infiere la ausencia de entradas en el repositorio completo.";
+  }
+  const symbols = index.files.flatMap((file) => file.symbols.map((symbol) => ({ ...symbol, file })));
+  if (/complej|m[aá]s compleja/u.test(normalized)) {
+    const mostComplex = symbols
+      .filter((symbol) => typeof symbol.cyclomaticComplexity === "number")
+      .sort((left, right) => (right.cyclomaticComplexity ?? 0) - (left.cyclomaticComplexity ?? 0))[0];
+    return mostComplex
+      ? `La función con mayor complejidad retenida es ${mostComplex.qualifiedName ?? mostComplex.name} en ${mostComplex.file.path}, líneas ${mostComplex.startLine}–${mostComplex.endLine}: complejidad ${mostComplex.cyclomaticComplexity} bajo el modelo sintáctico documentado.`
+      : "El índice no retuvo una métrica de complejidad de función para esta muestra.";
+  }
+  if (/funci[oó]n|clase|s[ií]mbolo/u.test(normalized)) {
+    return symbols.length > 0
+      ? `Símbolos estructurales retenidos: ${symbols.slice(0, 24).map((symbol) => `${symbol.kind} ${symbol.qualifiedName ?? symbol.name} (${symbol.file.path}:${symbol.startLine}–${symbol.endLine})`).join("; ")}.`
+      : "El índice persistido no retuvo símbolos para esta muestra.";
+  }
+  if (/m[oó]dulo|qu[eé] hace/u.test(normalized)) {
+    return references.length > 0
+      ? `El índice puede confirmar estructura en ${references.join(", ")}, pero no conserva cuerpos de código; por ello no puede afirmar el comportamiento semántico de un módulo sin una nueva inspección del contenido autorizado.`
+      : "No hay referencias estructurales persistidas para describir el módulo sin inventar comportamiento.";
+  }
+  return null;
+}
+
 /** Produces only claims represented by the persisted QA report. */
 export function answerQaDeterministically(
   analysis: QaPersistedAnalysisRunRecord,
@@ -79,6 +137,16 @@ export function answerQaDeterministically(
     ...analysis.reportSummary.limitations,
     "Los informes históricos conservan referencias y hashes de evidencia, no cuerpos ni extractos del repositorio.",
   ];
+  const structural = structuralAnswer(analysis, question);
+  if (structural) {
+    return {
+      mode: "deterministic",
+      verified: `${reportFacts(analysis)} ${structural}`,
+      citations: [],
+      limitations,
+      generation: { status: "not_requested" },
+    };
+  }
   if (analysis.findings.length === 0) {
     return {
       mode: "deterministic",

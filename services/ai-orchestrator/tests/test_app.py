@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Literal
@@ -25,6 +26,10 @@ from sentinelops_ai_orchestrator.app import (
     get_embedding_generator,
     get_local_chat_generator,
     get_model_readiness_checker,
+)
+from sentinelops_ai_orchestrator.python_ast import (
+    MAX_PYTHON_AST_FILE_BYTES,
+    analyze_python_sources,
 )
 
 
@@ -118,6 +123,123 @@ def test_health_endpoint_returns_expected_payload() -> None:
         "status": "ok",
         "service": "sentinelops-ai-orchestrator",
     }
+
+
+def python_ast_source(path: str, content: str) -> dict[str, object]:
+    return {
+        "path": path,
+        "content": content,
+        "contentSha256": sha256(content.encode("utf-8")).hexdigest(),
+        "byteLength": len(content.encode("utf-8")),
+    }
+
+
+def test_python_ast_extracts_only_structure_without_executing_source() -> None:
+    content = "\n".join([
+        "import os",
+        "from package import dependency",
+        "@decorator",
+        "class Worker(BaseWorker):",
+        "    @traced",
+        "    async def run(self, value, *, retries=0):",
+        "        if value and retries:",
+        "            for item in value:",
+        "                try:",
+        "                    with open(item) as handle:",
+        "                        return eval(handle.read())",
+        "                except OSError:",
+        "                    raise RuntimeError('not executed by AST')",
+        "        return None",
+    ])
+
+    result = analyze_python_sources([python_ast_source("src/worker.py", content)])
+
+    analyzed = result["files"][0]
+    assert analyzed["status"] == "parsed"
+    assert analyzed["contentSha256"] == sha256(content.encode("utf-8")).hexdigest()
+    assert analyzed["physicalLines"] == 14
+    assert analyzed["constructCounts"] == {
+        "if": 1,
+        "for": 1,
+        "asyncFor": 0,
+        "while": 0,
+        "try": 1,
+        "except": 1,
+        "with": 1,
+        "asyncWith": 0,
+        "return": 2,
+        "raise": 1,
+        "lambda": 0,
+        "decorator": 2,
+    }
+    symbols = analyzed["symbols"]
+    assert any(symbol["kind"] == "class" and symbol["name"] == "Worker" for symbol in symbols)
+    run = next(symbol for symbol in symbols if symbol["name"] == "run")
+    assert run["kind"] == "async_function"
+    assert run["parameterCount"] == 3
+    assert run["decoratorCount"] == 1
+    assert run["cyclomaticComplexity"] == 5
+    relations = analyzed["relations"]
+    assert any(relation["kind"] == "imports" and relation["to"] == "os" for relation in relations)
+    assert any(relation["kind"] == "from_imports" and relation["to"] == "package:dependency" for relation in relations)
+    assert any(relation["kind"] == "calls" and relation["to"] == "eval" for relation in relations)
+    assert any(relation["kind"] == "declares" and relation["to"] == "Worker.run" and relation["resolved"] for relation in relations)
+    assert any(relation["kind"] == "imports" and relation["resolution"] == "partially_resolved" for relation in relations)
+
+
+def test_python_ast_counts_async_constructs_lambdas_and_explicit_exports() -> None:
+    content = "\n".join([
+        "__all__ = ('process',)",
+        "async def process(items, resource):",
+        "    async with resource as handle:",
+        "        async for item in items:",
+        "            transform = lambda value: value",
+        "            return transform(item)",
+    ])
+
+    analyzed = analyze_python_sources([python_ast_source("src/async.py", content)])["files"][0]
+
+    assert analyzed["constructCounts"]["asyncFor"] == 1
+    assert analyzed["constructCounts"]["asyncWith"] == 1
+    assert analyzed["constructCounts"]["lambda"] == 1
+    assert any(relation["kind"] == "exports" and relation["to"] == "process" and relation["resolved"] for relation in analyzed["relations"])
+
+
+def test_python_ast_returns_a_file_diagnostic_for_invalid_syntax() -> None:
+    result = analyze_python_sources([
+        python_ast_source("broken.py", "def broken(:\n    pass\n"),
+    ])
+
+    analyzed = result["files"][0]
+    assert analyzed["status"] == "syntax_error"
+    assert analyzed["parseDiagnostics"] == 1
+    assert analyzed["symbols"] == []
+    assert analyzed["relations"] == []
+
+
+def test_python_ast_endpoint_is_authenticated_and_rejects_unsafe_or_oversized_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_ORCHESTRATOR_API_KEY", "a" * 32)
+    source = python_ast_source("safe.py", "pass\n")
+
+    unauthorized = client.post("/code-intelligence/python", json={"files": [source]})
+    assert unauthorized.status_code == 401
+
+    authorized = client.post(
+        "/code-intelligence/python",
+        json={"files": [{**source, "path": "../unsafe.py"}]},
+        headers={"Authorization": "Bearer " + "a" * 32},
+    )
+    assert authorized.status_code == 422
+
+    too_large = "x" * (MAX_PYTHON_AST_FILE_BYTES + 1)
+    rejected = client.post(
+        "/code-intelligence/python",
+        json={"files": [python_ast_source("large.py", too_large)]},
+        headers={"Authorization": "Bearer " + "a" * 32},
+    )
+    assert rejected.status_code == 422
 
 
 def test_readiness_endpoint_requires_both_local_models() -> None:
@@ -307,6 +429,7 @@ def test_openapi_contains_health_embeddings_and_chat() -> None:
     assert "get" in paths["/ready"]
     assert "post" in paths["/embeddings"]
     assert "post" in paths["/chat"]
+    assert "post" in paths["/code-intelligence/python"]
     assert "post" in paths["/warmup"]
 
 

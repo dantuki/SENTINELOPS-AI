@@ -14,10 +14,32 @@ autenticada y autorizada en un proyecto existente:
 
 Está implementado el análisis estructurado de `package.json` y README, inventario de rutas de tests,
 material con cabeceras de claves privadas y llamadas reales a `eval(...)` en AST
-de TypeScript/JavaScript. El informe también conserva métricas acotadas de
-símbolos y relaciones sintácticas, sin resolver módulos ni ejecutar código. Los hallazgos
+de TypeScript/JavaScript, además de AST Python estándar mediante un endpoint interno
+autenticado. El parser Python recibe contenido acotado, no abre las rutas indicadas,
+no importa ni ejecuta módulos y no requiere Ollama. Extrae funciones, async functions,
+clases, imports, llamadas, `with`/`async with`, `for`/`async for`, `lambda`,
+decoradores, rangos y hashes. El informe conserva métricas acotadas de símbolos y
+relaciones sintácticas, sin resolver módulos ni ejecutar código. Las declaraciones y
+exportaciones explícitas se marcan como resueltas dentro del AST; imports identifican el
+especificador pero quedan parcialmente resueltos, y llamadas permanecen no resueltas.
+Los hallazgos
 incluyen regla/versionado, archivo, rango de líneas, extracto redactado y
 SHA-256 del contenido inspeccionado. No se calcula un “score de calidad”.
+
+Las métricas físicas, de líneas de código y complejidad se etiquetan por su
+modelo: `exact_under_model`, `approximate`, `unknown` o `not_applicable`.
+La complejidad ciclomática implementada parte de 1 y suma decisiones sintácticas
+(ramas, bucles, excepciones, condicionales y operadores booleanos cortocircuitados);
+no mide cobertura, coste ni rutas observadas en ejecución. Las relaciones de llamada
+e importación son sintácticas y no prueban carga, flujo de datos, ejecución ni
+explotabilidad.
+
+El conjunto de reglas actual es deliberadamente pequeño: `eval` de JS/TS por AST,
+`eval`/`exec` de Python, `subprocess` con `shell=True` y comando no literal, errores de
+sintaxis y complejidad por función de al menos 10. Un comando literal con `shell=True`
+no activa esa regla; tampoco lo hacen los textos y comentarios que sólo mencionan `eval`.
+Los resultados son señales estructurales verificadas, no una afirmación de vulnerabilidad
+explotable.
 
 La selección descarga como máximo 30 archivos y conserva presupuestos deterministas: manifiestos principales (4), documentación técnica (4), código representativo (10), configuración de prueba/lint/CI (4) y rutas de prueba (8). Las categorías se priorizan en ese orden para conservar primero contrato y documentación bajo una cuota limitada. Las rutas restantes se inventarían sólo como metadatos y se declaran como no descargadas; la interfaz nunca afirma que todo el repositorio fue revisado.
 
@@ -50,9 +72,10 @@ La consulta se limita a una rama por defecto y a inventario de blobs de texto:
 Se excluyen rutas de construcción, dependencias, `.git` y rutas no seguras.
 El contenido se mantiene en memoria para el análisis; la base persiste sólo la
 identidad del origen, el informe, hashes/ubicaciones de evidencia y un resumen
-cuantitativo de la estructura estática; no persiste cuerpos de archivos, símbolos,
-relaciones ni extractos del informe. Un origen deshabilitado no se reactiva mediante esta
-ruta.
+cuantitativo. Además conserva un índice estructural globalmente acotado de nombres,
+tipos, rangos, hashes y relaciones sintácticas para responder preguntas históricas; no
+persiste cuerpos de archivos, extractos, secretos ni texto ejecutable. Un origen
+deshabilitado no se reactiva mediante esta ruta.
 
 Nunca se ejecutan `npm install`, scripts del repositorio, tests, binarios,
 contenedores ni archivos descargados. El estado de prueba se presenta
@@ -114,6 +137,13 @@ una cita ajena se descarta y se conserva la respuesta determinista. La
 interpretación generativa se etiqueta como no verificada; no prueba nuevos
 hechos ni resultados de tests.
 
+Las afirmaciones de README se tratan como datos no confiables. El motor registra
+afirmaciones simples de scripts, tecnologías y referencias de archivo como
+`documented`, `corroborated`, `contradicted` o `unverified`, guardando ambas
+referencias cuando existe comparación. La ausencia de una ruta en una muestra acotada
+permanece `unverified`, nunca se presenta como ausencia global. No se ejecutan
+instrucciones escritas en la documentación.
+
 ## Ejecución local y validación
 
 No cambie `.env` para usar el flujo. Con los servicios de autenticación y
@@ -151,6 +181,21 @@ npm.cmd run typecheck --workspace=@sentinelops/web
 npm.cmd run build --workspace=@sentinelops/web
 git diff --check
 ```
+
+El benchmark local reproducible de inteligencia estructural requiere un orquestador
+Python temporal o ya autorizado, pero no GitHub, Ollama, Docker ni PostgreSQL. Escribe
+sus artefactos fuera del repositorio para no mezclar reportes con código:
+
+```powershell
+npm.cmd --prefix apps/api run benchmark:code-intelligence -- --output=$env:TEMP\sentinelops-qa-benchmark --python-url=http://127.0.0.1:8000
+```
+
+Genera fixtures sintéticos small (10 archivos), medium (50) y large (250), JS/TS/Python
+y controles adversariales. Reporta separado: TP, FP, FN, precision, recall y F1 del
+detector sobre defectos de archivos seleccionados; cobertura de selección sobre todos
+los casos de ground truth; citas válidas/inválidas; archivos inspeccionados y tiempo.
+Los denominadores cero se expresan como `null`/`n/a`, no como precisión perfecta. El
+benchmark no autoriza ni sustituye una importación o E2E contra GitHub.
 
 Las pruebas cubren URL canónica, límites y rutas no seguras, ausencia de
 ejecución, evidencia/redacción, clasificación de errores GitHub, AST sin host

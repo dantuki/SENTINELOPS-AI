@@ -1,5 +1,6 @@
 """FastAPI application for the SentinelOps AI orchestrator."""
 
+import asyncio
 import json
 import logging
 import math
@@ -13,6 +14,12 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from .python_ast import (
+    MAX_PYTHON_AST_FILES,
+    MAX_PYTHON_AST_FILE_BYTES,
+    analyze_python_sources,
+)
+
 
 # Embeddings locales mediante Ollama.
 EMBEDDING_MODEL = "qwen3-embedding:0.6b"
@@ -22,6 +29,7 @@ MAX_TEXT_CHARS = 20_000
 EMBEDDING_TIMEOUT_SECONDS = 30.0
 DEFAULT_CHAT_TIMEOUT_SECONDS = 90.0
 MAX_CHAT_TIMEOUT_SECONDS = 300.0
+PYTHON_AST_TIMEOUT_SECONDS = 2.0
 
 
 def get_chat_timeout_seconds() -> float:
@@ -173,6 +181,24 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class PythonAstSourceRequest(BaseModel):
+    """Bounded text supplied for structural Python parsing only."""
+
+    path: str = Field(min_length=1, max_length=512)
+    content: str = Field(max_length=MAX_PYTHON_AST_FILE_BYTES)
+    contentSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byteLength: int = Field(ge=0, le=MAX_PYTHON_AST_FILE_BYTES)
+
+
+class PythonAstRequest(BaseModel):
+    """A small caller-provided batch; no repository path is ever opened."""
+
+    files: list[PythonAstSourceRequest] = Field(
+        min_length=1,
+        max_length=MAX_PYTHON_AST_FILES,
+    )
+
+
 class EmbeddingRequest(BaseModel):
     """Input texts to convert into vector embeddings."""
 
@@ -291,6 +317,41 @@ def health_check() -> HealthResponse:
         status="ok",
         service="sentinelops-ai-orchestrator",
     )
+
+
+@app.post(
+    "/code-intelligence/python",
+    tags=["Code intelligence"],
+    summary="Parse bounded Python source text without executing it",
+)
+async def analyze_python_code(
+    payload: PythonAstRequest,
+    _service_auth: None = Depends(require_internal_service_auth),
+) -> dict[str, object]:
+    """Return structural facts about provided Python text, not runtime facts.
+
+    The parser never opens ``path``, imports a module, or executes source.  A
+    finite wall-time bound complements input, depth, and result limits.  A
+    timed-out batch is rejected rather than being reported as a clean parse.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                analyze_python_sources,
+                [source.model_dump() for source in payload.files],
+            ),
+            timeout=PYTHON_AST_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Python structural analysis exceeded its bounded timeout.",
+        ) from None
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="Python structural analysis request is invalid.",
+        ) from None
 
 
 async def get_loaded_model_names() -> set[str]:
