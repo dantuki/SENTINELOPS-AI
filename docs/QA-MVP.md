@@ -12,12 +12,14 @@ autenticada y autorizada en un proyecto existente:
 5. La interfaz muestra eventos persistidos del trabajo, hallazgos con evidencia
    y permite preguntas sobre informes conservados en la conversación.
 
-Está implementado el análisis de scripts de `package.json`, inventario de rutas de tests,
-material con cabeceras de claves privadas y uso de `eval(...)`. Los hallazgos
+Está implementado el análisis estructurado de `package.json` y README, inventario de rutas de tests,
+material con cabeceras de claves privadas y llamadas reales a `eval(...)` en AST
+de TypeScript/JavaScript. El informe también conserva métricas acotadas de
+símbolos y relaciones sintácticas, sin resolver módulos ni ejecutar código. Los hallazgos
 incluyen regla/versionado, archivo, rango de líneas, extracto redactado y
 SHA-256 del contenido inspeccionado. No se calcula un “score de calidad”.
 
-La selección descarga como máximo 30 archivos y conserva presupuestos deterministas: manifiestos principales (4), configuración de prueba/lint/CI (4), rutas de prueba (8), código representativo (10) y documentación técnica (4). Las rutas restantes se inventarían sólo como metadatos y se declaran como no descargadas; la interfaz nunca afirma que todo el repositorio fue revisado.
+La selección descarga como máximo 30 archivos y conserva presupuestos deterministas: manifiestos principales (4), documentación técnica (4), código representativo (10), configuración de prueba/lint/CI (4) y rutas de prueba (8). Las categorías se priorizan en ese orden para conservar primero contrato y documentación bajo una cuota limitada. Las rutas restantes se inventarían sólo como metadatos y se declaran como no descargadas; la interfaz nunca afirma que todo el repositorio fue revisado.
 
 Las pruebas se comunican por separado: script declarado en un manifiesto inspeccionado, rutas detectadas en el inventario y ejecución (`not_executed`). No observar una ruta de pruebas en la muestra ni un script en un manifiesto omitido no permite concluir que el repositorio carece de pruebas.
 
@@ -47,8 +49,9 @@ La consulta se limita a una rama por defecto y a inventario de blobs de texto:
 
 Se excluyen rutas de construcción, dependencias, `.git` y rutas no seguras.
 El contenido se mantiene en memoria para el análisis; la base persiste sólo la
-identidad del origen y metadatos del repositorio, no los cuerpos de archivos ni
-extractos del informe. Un origen deshabilitado no se reactiva mediante esta
+identidad del origen, el informe, hashes/ubicaciones de evidencia y un resumen
+cuantitativo de la estructura estática; no persiste cuerpos de archivos, símbolos,
+relaciones ni extractos del informe. Un origen deshabilitado no se reactiva mediante esta
 ruta.
 
 Nunca se ejecutan `npm install`, scripts del repositorio, tests, binarios,
@@ -87,6 +90,15 @@ guardan cuerpos de repositorio, prompts ni extractos. Una misma clave de
 idempotencia se limita a `proyecto + usuario`; una clave nueva crea una
 solicitud voluntaria distinta. Un reinicio marca trabajos pendientes como
 fallidos, nunca completados.
+
+Los fallos de GitHub se clasifican sin exponer cuerpos de respuesta: repositorio
+ausente o no público, límite primario/secundario, prohibición, timeout,
+indisponibilidad, árbol truncado, tamaño, contenido no compatible y respuesta
+inválida. Los logs conservan sólo código seguro, estado HTTP y metadatos de
+rate limit (`remaining`, `reset`, `retry-after` y request id de GitHub), nunca
+tokens ni trazas en la UI. El importador no reintenta solicitudes de GitHub y,
+si el encabezado de cuota indica agotamiento, falla o detiene la muestra antes
+de excederla.
 
 La conversación consulta informes persistidos por `analysisRunId` mediante
 `POST /api/projects/:projectId/qa/conversations/:conversationId/assistant`.
@@ -141,7 +153,8 @@ git diff --check
 ```
 
 Las pruebas cubren URL canónica, límites y rutas no seguras, ausencia de
-ejecución, evidencia/redacción, autorización, origen deshabilitado, contrato
+ejecución, evidencia/redacción, clasificación de errores GitHub, AST sin host
+de archivos, autorización, origen deshabilitado, contrato
 de trabajos/web, fallback generativo y respuestas deterministas sobre el
 informe. Una ejecución E2E contra una
 instancia autenticada y GitHub público debe registrarse separadamente: las

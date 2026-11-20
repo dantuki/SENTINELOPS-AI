@@ -19,13 +19,31 @@ export type GithubImportErrorCode =
   | "invalid_repository_url"
   | "repository_not_found"
   | "repository_not_public"
+  | "github_rate_limited"
+  | "github_secondary_rate_limited"
+  | "github_forbidden"
   | "github_unavailable"
   | "github_timeout"
-  | "github_invalid_response"
-  | "repository_limit_exceeded";
+  | "repository_too_large"
+  | "repository_tree_truncated"
+  | "unsupported_repository_content"
+  | "invalid_github_response"
+  | "analysis_timeout"
+  | "internal_analysis_error";
+
+export interface GithubRateLimitMetadata {
+  remaining: number | null;
+  resetAt: number | null;
+  retryAfterSeconds: number | null;
+  requestId: string | null;
+}
 
 export class GithubImportError extends Error {
-  constructor(public readonly code: GithubImportErrorCode) {
+  constructor(
+    public readonly code: GithubImportErrorCode,
+    public readonly status: number | null = null,
+    public readonly rateLimit: GithubRateLimitMetadata | null = null,
+  ) {
     super(code);
     this.name = "GithubImportError";
   }
@@ -89,6 +107,12 @@ interface GithubContentResponse {
   content: string;
 }
 
+interface GithubJsonResponse {
+  status: number;
+  payload: unknown;
+  rateLimit: GithubRateLimitMetadata;
+}
+
 type GithubFetch = typeof fetch;
 
 const GITHUB_NAME = /^[A-Za-z0-9_.-]{1,100}$/u;
@@ -107,6 +131,14 @@ const CATEGORY_BUDGETS: Record<QaInventoryCategory, number> = {
   documentation: 4,
   other: 0,
 };
+const CATEGORY_ORDER: readonly QaInventoryCategory[] = [
+  "manifest",
+  "documentation",
+  "source",
+  "test_configuration",
+  "test",
+  "other",
+];
 const MANIFEST_NAMES = new Set([
   "package.json", "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
   "pytest.ini", "tox.ini", "pom.xml", "build.gradle", "cargo.toml", "go.mod",
@@ -195,13 +227,13 @@ async function readResponseTextAtMost(
 ): Promise<string> {
   const advertisedLength = response.headers.get("content-length");
   if (advertisedLength && Number(advertisedLength) > maximumBytes) {
-    throw new GithubImportError("repository_limit_exceeded");
+    throw new GithubImportError("repository_too_large");
   }
   const reader = response.body?.getReader();
   if (!reader) {
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > maximumBytes) {
-      throw new GithubImportError("repository_limit_exceeded");
+      throw new GithubImportError("repository_too_large");
     }
     return text;
   }
@@ -215,7 +247,7 @@ async function readResponseTextAtMost(
       length += next.value.byteLength;
       if (length > maximumBytes) {
         await reader.cancel();
-        throw new GithubImportError("repository_limit_exceeded");
+        throw new GithubImportError("repository_too_large");
       }
       parts.push(next.value);
     }
@@ -231,13 +263,73 @@ async function readResponseTextAtMost(
   return new TextDecoder("utf-8", { fatal: true }).decode(output);
 }
 
+function headerInteger(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (!value || !/^\d+$/u.test(value.trim())) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function githubRateLimitMetadata(headers: Headers): GithubRateLimitMetadata {
+  const retryAfter = headerInteger(headers, "retry-after");
+  return {
+    remaining: headerInteger(headers, "x-ratelimit-remaining"),
+    resetAt: headerInteger(headers, "x-ratelimit-reset"),
+    retryAfterSeconds: retryAfter === null ? null : Math.min(retryAfter, 86_400),
+    requestId: headers.get("x-github-request-id")?.slice(0, 200) ?? null,
+  };
+}
+
+async function githubErrorMessage(response: Response): Promise<string> {
+  try {
+    const text = await readResponseTextAtMost(response, 16 * 1024);
+    const body: unknown = JSON.parse(text);
+    return isRecord(body) && typeof body.message === "string"
+      ? body.message.slice(0, 500)
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+async function githubErrorForResponse(response: Response): Promise<GithubImportError> {
+  const rateLimit = githubRateLimitMetadata(response.headers);
+  const message = await githubErrorMessage(response);
+  const secondary = /secondary rate limit|abuse detection/iu.test(message) || rateLimit.retryAfterSeconds !== null;
+
+  if (response.status === 404) {
+    return new GithubImportError("repository_not_found", response.status, rateLimit);
+  }
+  if (response.status === 429) {
+    return new GithubImportError(
+      secondary ? "github_secondary_rate_limited" : "github_rate_limited",
+      response.status,
+      rateLimit,
+    );
+  }
+  if (response.status === 403) {
+    if (rateLimit.remaining === 0) {
+      return new GithubImportError("github_rate_limited", response.status, rateLimit);
+    }
+    return new GithubImportError(
+      secondary ? "github_secondary_rate_limited" : "github_forbidden",
+      response.status,
+      rateLimit,
+    );
+  }
+  if (response.status >= 500) {
+    return new GithubImportError("github_unavailable", response.status, rateLimit);
+  }
+  return new GithubImportError("invalid_github_response", response.status, rateLimit);
+}
+
 async function githubJson(
   fetchImpl: GithubFetch,
   url: URL,
   maximumBytes: number,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<{ status: number; payload: unknown }> {
+): Promise<GithubJsonResponse> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -252,41 +344,45 @@ async function githubJson(
     });
   } catch (error: unknown) {
     if (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)) {
+      if (signal?.aborted && signal.reason instanceof Error && signal.reason.message === "analysis_timeout") {
+        throw new GithubImportError("analysis_timeout");
+      }
       throw new GithubImportError("github_timeout");
     }
     throw new GithubImportError("github_unavailable");
   }
 
-  if (response.status === 404) {
-    throw new GithubImportError("repository_not_found");
-  }
   if (!response.ok) {
-    throw new GithubImportError("github_unavailable");
+    throw await githubErrorForResponse(response);
   }
   try {
-    return { status: response.status, payload: JSON.parse(await readResponseTextAtMost(response, maximumBytes)) };
+    return {
+      status: response.status,
+      payload: JSON.parse(await readResponseTextAtMost(response, maximumBytes)),
+      rateLimit: githubRateLimitMetadata(response.headers),
+    };
   } catch (error: unknown) {
     if (error instanceof GithubImportError) throw error;
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("invalid_github_response", response.status, githubRateLimitMetadata(response.headers));
   }
 }
 
 function decodeContent(value: GithubContentResponse, maximumBytes: number): string {
   if (value.encoding !== "base64" || typeof value.content !== "string") {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("unsupported_repository_content");
   }
   const compact = value.content.replace(/\s/gu, "");
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(compact)) {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("invalid_github_response");
   }
   const bytes = Buffer.from(compact, "base64");
   if (bytes.byteLength > maximumBytes) {
-    throw new GithubImportError("repository_limit_exceeded");
+    throw new GithubImportError("repository_too_large");
   }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("unsupported_repository_content");
   }
 }
 
@@ -351,12 +447,12 @@ export async function importPublicGithubRepository(
     options.signal,
   );
   if (!hasExpectedKeys(metadataResponse.payload, ["private", "default_branch"])) {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("invalid_github_response");
   }
   const metadata = metadataResponse.payload as GithubRepositoryMetadata;
   if (metadata.private !== false) throw new GithubImportError("repository_not_public");
   if (typeof metadata.default_branch !== "string" || !metadata.default_branch.trim()) {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("invalid_github_response");
   }
 
   await reportProgress({
@@ -371,16 +467,21 @@ export async function importPublicGithubRepository(
     options.signal,
   );
   if (!hasExpectedKeys(treeResponse.payload, ["sha", "tree"])) {
-    throw new GithubImportError("github_invalid_response");
+    throw new GithubImportError("invalid_github_response");
   }
   const tree = treeResponse.payload as GithubTreeResponse;
   if (
     typeof tree.sha !== "string" ||
     !Array.isArray(tree.tree) ||
-    tree.truncated === true ||
-    tree.tree.length > limits.maxTreeEntries
+    tree.truncated === true
   ) {
-    throw new GithubImportError("repository_limit_exceeded");
+    throw new GithubImportError("repository_tree_truncated", treeResponse.status, treeResponse.rateLimit);
+  }
+  if (tree.tree.length > limits.maxTreeEntries) {
+    throw new GithubImportError("repository_too_large", treeResponse.status, treeResponse.rateLimit);
+  }
+  if (tree.tree.length > 0 && treeResponse.rateLimit.remaining === 0) {
+    throw new GithubImportError("github_rate_limited", treeResponse.status, treeResponse.rateLimit);
   }
 
   const skipped = { unsupported: 0, tooLarge: 0, invalidPath: 0, limitReached: 0 };
@@ -426,12 +527,17 @@ export async function importPublicGithubRepository(
     manifest: 0, test_configuration: 0, source: 0, test: 0, documentation: 0, other: 0,
   };
   let totalBytes = 0;
-  for (const category of Object.keys(CATEGORY_BUDGETS) as QaInventoryCategory[]) {
+  // The importer never retries upstream requests. When GitHub supplies the
+  // remaining quota we stop before issuing requests that would exceed it.
+  let remainingContentRequests = treeResponse.rateLimit.remaining;
+  let contentRequestsIssued = 0;
+  for (const category of CATEGORY_ORDER) {
     const entries = (candidates.get(category) ?? []).sort(compareCandidates);
     for (const entry of entries) {
       if (
         selectedByCategory[category] >= CATEGORY_BUDGETS[category] ||
         files.length >= limits.maxFiles ||
+        (remainingContentRequests !== null && contentRequestsIssued >= remainingContentRequests) ||
         totalBytes + (entry.size ?? 0) > limits.maxTotalBytes
       ) {
         skipped.limitReached += 1;
@@ -454,6 +560,7 @@ export async function importPublicGithubRepository(
         filePath: entry.path,
         processedFiles: files.length,
       });
+      contentRequestsIssued += 1;
       const contentResponse = await githubJson(
         fetchImpl,
         contentUrl,
@@ -461,8 +568,13 @@ export async function importPublicGithubRepository(
         limits.timeoutMs,
         options.signal,
       );
+      if (contentResponse.rateLimit.remaining !== null) {
+        remainingContentRequests = contentResponse.rateLimit.remaining;
+      } else if (remainingContentRequests !== null) {
+        remainingContentRequests = Math.max(0, remainingContentRequests - 1);
+      }
       if (!hasExpectedKeys(contentResponse.payload, ["encoding", "content"])) {
-        throw new GithubImportError("github_invalid_response");
+        throw new GithubImportError("invalid_github_response", contentResponse.status, contentResponse.rateLimit);
       }
       const content = decodeContent(contentResponse.payload as GithubContentResponse, limits.maxFileBytes);
       const byteLength = Buffer.byteLength(content, "utf8");
@@ -480,7 +592,7 @@ export async function importPublicGithubRepository(
     selectionStrategy: "category_priority_v1",
     discoveredFiles: Object.values(discoveredByCategory).reduce((total, value) => total + value, 0),
     selectedFiles: files.length,
-    categories: (Object.keys(CATEGORY_BUDGETS) as QaInventoryCategory[]).map((category) => ({
+    categories: CATEGORY_ORDER.map((category) => ({
       category,
       discovered: discoveredByCategory[category],
       selected: selectedByCategory[category],

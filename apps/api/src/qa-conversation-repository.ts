@@ -55,6 +55,15 @@ export interface QaPersistedAnalysisRunRecord extends QaAnalysisRunRecord {
     detectedStack: string[];
     inspectedFileCount: number;
     findingCount: number;
+    codeIntelligence?: {
+      version: string;
+      analyzedFileCount: number;
+      parsedFileCount: number;
+      symbolCount: number;
+      relationCount: number;
+      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      parseDiagnosticCount: number;
+    };
     limitations: string[];
     testExecution: QaAnalysisReport["testExecution"];
   };
@@ -90,6 +99,10 @@ function safeReportSummary(report: QaAnalysisReport): Record<string, unknown> {
     detectedStack: report.detectedStack,
     inspectedFileCount: report.inspectedFiles.length,
     findingCount: report.findings.length,
+    codeIntelligence: {
+      version: report.codeIntelligence.version,
+      ...report.codeIntelligence.summary,
+    },
     limitations: report.limitations,
     testExecution: report.testExecution,
   };

@@ -29,6 +29,7 @@ export function messageForQaApiFailure(status: number, payload?: unknown): strin
     404: "No se encontró el proyecto o el repositorio público.",
     409: "Ese origen no está disponible para este proyecto.",
     422: "El repositorio no cumple los límites o las reglas de importación segura.",
+    429: "GitHub limitó temporalmente las solicitudes. Espera antes de iniciar un nuevo análisis.",
     502: "GitHub devolvió una respuesta no válida para el análisis.",
     503: "El servicio de importación no está disponible temporalmente.",
     504: "La importación tardó demasiado. Puedes intentarlo de nuevo.",

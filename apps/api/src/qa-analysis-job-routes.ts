@@ -71,6 +71,7 @@ export function registerQaAnalysisJobRoutes(app: FastifyInstance, options: QaAna
           404: apiErrorSchema,
           409: apiErrorSchema,
           422: apiErrorSchema,
+          429: apiErrorSchema,
           502: apiErrorSchema,
           503: apiErrorSchema,
           504: apiErrorSchema,

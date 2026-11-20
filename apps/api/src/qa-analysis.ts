@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import {
+  analyzeRepositoryCode,
+  findDynamicEvalCalls,
+  type QaCodeIntelligenceReport,
+} from "./code-intelligence.js";
 
-export const QA_RULESET_VERSION = "qa-static-v1";
+export const QA_RULESET_VERSION = "qa-static-v2";
 
 export type QaFindingCategory =
   | "configuration"
@@ -82,6 +87,7 @@ export interface QaAnalysisReport {
   inspectedFiles: Array<Pick<QaSourceFile, "path" | "contentSha256" | "byteLength">>;
   checksPerformed: string[];
   findings: QaFinding[];
+  codeIntelligence: QaCodeIntelligenceReport;
   limitations: string[];
   testExecution: {
     status: "not_executed";
@@ -90,7 +96,6 @@ export interface QaAnalysisReport {
 }
 
 const PRIVATE_KEY_MARKER = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/u;
-const EVAL_CALL = /\beval\s*\(/u;
 const SENSITIVE_ASSIGNMENT = /\b(?:api[_-]?key|password|secret|token)\b\s*[:=]\s*(["'`])[^"'`\r\n]+\1/giu;
 const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/gu;
 function hash(value: string): string {
@@ -182,11 +187,12 @@ function hasDeclaredScript(value: unknown, scriptName: string): boolean {
 export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
   const files = [...input.files].sort((left, right) => comparePaths(left.path, right.path));
   const findings: QaFinding[] = [];
+  const codeIntelligence = analyzeRepositoryCode(files);
   const checksPerformed = [
     "Inventario de metadatos y selección acotada por categorías",
     "Detección de stack mediante manifiestos y extensiones",
     "Configuración declarada de pruebas y lint",
-    "Patrones estáticos de claves privadas y ejecución dinámica",
+    "Patrones estáticos de claves privadas y llamadas dinámicas con AST en TypeScript/JavaScript",
   ];
   const packageFile = files.find((file) => file.path === "package.json");
 
@@ -246,8 +252,7 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
       }));
     }
 
-    const evalLine = lineFor(file.content, EVAL_CALL);
-    if (evalLine !== null) {
+    for (const evalCall of findDynamicEvalCalls(file)) {
       findings.push(finding({
         ruleId: "qa.security.dynamic_eval",
         category: "security",
@@ -256,13 +261,14 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
         description: "El análisis estático encontró una llamada a eval en el archivo indicado.",
         whyItMatters: "La ejecución dinámica puede amplificar el riesgo si recibe datos no confiables; este hallazgo no demuestra que exista una ruta explotable.",
         recommendation: "Sustituye eval por una alternativa con datos y operaciones permitidas explícitamente, o documenta el aislamiento aplicable.",
-        evidence: evidenceFor(file, evalLine),
+        evidence: evidenceFor(file, evalCall.startLine),
       }));
     }
   }
 
   const analysisIdentity = [
     QA_RULESET_VERSION,
+    codeIntelligence.version,
     input.repositoryUrl,
     input.revision,
     ...files.map((file) => `${file.path}:${file.contentSha256}`),
@@ -282,10 +288,12 @@ export function analyzeQaProject(input: QaAnalysisInput): QaAnalysisReport {
     })),
     checksPerformed,
     findings,
+    codeIntelligence,
     limitations: [
       "El análisis inspecciona únicamente archivos de texto soportados y no ejecuta instalaciones, builds, linters ni pruebas del repositorio.",
       "El inventario de rutas puede detectar pruebas fuera de la muestra descargada; una ausencia en la muestra no permite afirmar que el repositorio no tenga pruebas.",
       "La ausencia de un hallazgo en estas reglas no demuestra que el proyecto esté libre de defectos o vulnerabilidades.",
+      ...codeIntelligence.limitations,
     ],
     testExecution: {
       status: "not_executed",

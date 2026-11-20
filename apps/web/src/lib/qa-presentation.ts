@@ -34,6 +34,17 @@ export interface QaAnalysisReport {
   }>;
   checksPerformed: string[];
   findings: QaFinding[];
+  codeIntelligence?: {
+    version: string;
+    summary: {
+      analyzedFileCount: number;
+      parsedFileCount: number;
+      symbolCount: number;
+      relationCount: number;
+      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      parseDiagnosticCount: number;
+    };
+  };
   limitations: string[];
   testExecution: {
     status: "not_executed";
@@ -152,6 +163,11 @@ export interface QaAnalysisJobEvent {
   createdAt: string;
 }
 
+/** A terminal job must never be rendered as work that is still in progress. */
+export function isTerminalQaAnalysisJob(job: { status: string }): boolean {
+  return job.status === "completed" || job.status === "failed";
+}
+
 export interface QaAssistantResponse {
   mode: "deterministic" | "generative";
   verified: string;
@@ -189,6 +205,15 @@ export interface QaPersistedAnalysis {
     detectedStack: string[];
     inspectedFileCount: number;
     findingCount: number;
+    codeIntelligence?: {
+      version: string;
+      analyzedFileCount: number;
+      parsedFileCount: number;
+      symbolCount: number;
+      relationCount: number;
+      languageCounts: { javascript: number; typescript: number; unsupported: number };
+      parseDiagnosticCount: number;
+    };
     limitations: string[];
     testExecution: {
       status: "not_executed";
@@ -222,6 +247,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isCodeIntelligenceSummary(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const languageCounts = value.languageCounts;
+  if (!isRecord(languageCounts)) return false;
+  return (
+    ["analyzedFileCount", "parsedFileCount", "symbolCount", "relationCount", "parseDiagnosticCount"].every(
+      (key) => typeof value[key] === "number",
+    ) &&
+    ["javascript", "typescript", "unsupported"].every(
+      (key) => typeof languageCounts[key] === "number",
+    )
+  );
+}
+
+function isCodeIntelligenceReport(value: unknown): boolean {
+  return isRecord(value) && typeof value.version === "string" && isCodeIntelligenceSummary(value.summary);
 }
 
 function isFinding(value: unknown): value is QaFinding {
@@ -310,6 +353,11 @@ export function isQaPersistedAnalysis(value: unknown): value is QaPersistedAnaly
     isStringArray(reportSummary.detectedStack) &&
     typeof reportSummary.inspectedFileCount === "number" &&
     typeof reportSummary.findingCount === "number" &&
+    (!("codeIntelligence" in reportSummary) || (
+      isRecord(reportSummary.codeIntelligence) &&
+      typeof reportSummary.codeIntelligence.version === "string" &&
+      isCodeIntelligenceSummary(reportSummary.codeIntelligence)
+    )) &&
     isStringArray(reportSummary.limitations) &&
     isRecord(reportSummary.testExecution) &&
     reportSummary.testExecution.status === "not_executed" &&
@@ -427,6 +475,7 @@ export function isQaImportResult(value: unknown): value is QaImportResult {
     ) &&
     isStringArray(analysis.checksPerformed) &&
     Array.isArray(analysis.findings) && analysis.findings.every(isFinding) &&
+    (!("codeIntelligence" in analysis) || isCodeIntelligenceReport(analysis.codeIntelligence)) &&
     isStringArray(analysis.limitations) &&
     isRecord(analysis.testExecution) &&
     analysis.testExecution.status === "not_executed" &&

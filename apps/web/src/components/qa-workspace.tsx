@@ -6,6 +6,7 @@ import {
   isQaAnalysisJobEvent,
   isQaAssistantResponse,
   isQaPersistedAnalysis,
+  isTerminalQaAnalysisJob,
   type QaConversation,
   type QaConversationMessage,
   type QaAnalysisJob,
@@ -193,6 +194,12 @@ function HistoricalAnalysisReport({ analysis }: { analysis: QaPersistedAnalysis 
           <dt>Pruebas del repositorio</dt>
           <dd>{analysis.reportSummary.testExecution.reason}</dd>
         </div>
+        {analysis.reportSummary.codeIntelligence ? (
+          <div>
+            <dt>Estructura estática</dt>
+            <dd>{analysis.reportSummary.codeIntelligence.parsedFileCount} archivos AST · {analysis.reportSummary.codeIntelligence.symbolCount} símbolos</dd>
+          </div>
+        ) : null}
       </dl>
       <div className="qa-report-section">
         <h4>Hallazgos y referencias retenidas</h4>
@@ -250,6 +257,12 @@ function AnalysisReport({ result }: { result: QaImportResult }) {
             ? `${analysis.inventory.testFiles.discovered} rutas detectadas; ${analysis.inventory.testFiles.selected} inspeccionadas`
             : "No observadas en las rutas inventariadas"}</dd>
         </div>
+        {analysis.codeIntelligence ? (
+          <div>
+            <dt>Estructura estática</dt>
+            <dd>{analysis.codeIntelligence.summary.parsedFileCount} archivos AST · {analysis.codeIntelligence.summary.symbolCount} símbolos · {analysis.codeIntelligence.summary.relationCount} relaciones sintácticas</dd>
+          </div>
+        ) : null}
       </dl>
       <div className="qa-report-section">
         <h4>Qué encontré</h4>
@@ -330,6 +343,7 @@ export function QaWorkspace() {
     () => projects.find((project) => project.id === projectId) ?? null,
     [projectId, projects],
   );
+  const activeJobIsInProgress = activeJob !== null && !isTerminalQaAnalysisJob(activeJob);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -455,6 +469,7 @@ export function QaWorkspace() {
         if (job.status === "completed" || job.status === "failed") {
           window.sessionStorage.removeItem(jobStorageKey(projectId));
           setActiveJobId("");
+          setActiveJob(null);
           setIsImporting(false);
           if (job.status === "failed") {
             setImportError(job.errorMessage ?? "El análisis no pudo completarse. Puedes iniciar uno nuevo.");
@@ -722,12 +737,12 @@ export function QaWorkspace() {
         <header className="qa-topbar">
           <div>
             <p className="qa-kicker">{activeConversationId ? "CONVERSACIÓN DE PROYECTO" : "NUEVO ANÁLISIS"} · EVIDENCIA PRIMERO</p>
-            <h1 id="qa-title">{activeJob ? "Analizando un repositorio con etapas verificables." : persistedAnalyses[0] ? `Informe QA: ${persistedAnalyses[0].reportSummary.findingCount} hallazgos verificables.` : "Entiende la calidad de tu proyecto sin ejecutar código no confiable."}</h1>
+            <h1 id="qa-title">{activeJobIsInProgress ? "Analizando un repositorio con etapas verificables." : persistedAnalyses[0] ? `Informe QA: ${persistedAnalyses[0].reportSummary.findingCount} hallazgos verificables.` : "Entiende la calidad de tu proyecto sin ejecutar código no confiable."}</h1>
           </div>
           <span className="qa-readonly">Análisis estático · solo lectura</span>
         </header>
 
-        {activeJob ? (
+        {activeJobIsInProgress ? (
           <section className="qa-job-progress" aria-labelledby="qa-job-progress-title" aria-live="polite">
             <header>
               <div>

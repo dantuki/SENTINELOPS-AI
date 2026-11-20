@@ -13,10 +13,10 @@ import {
 } from "../src/github-repository-import.js";
 import { answerQaDeterministically, answerQaQuestion } from "../src/qa-assistant.js";
 import { buildApp } from "../src/app.js";
-import { registerQaRoutes } from "../src/qa-routes.js";
+import { mapGithubImportError, registerQaRoutes } from "../src/qa-routes.js";
 import { registerQaAnalysisJobRoutes } from "../src/qa-analysis-job-routes.js";
 import type { QaAnalysisJobRecord } from "../src/qa-analysis-job-repository.js";
-import type { QaAnalysisJobRunner } from "../src/qa-analysis-job-runner.js";
+import { QaAnalysisJobRunner } from "../src/qa-analysis-job-runner.js";
 import { registerQaAssistantRoutes } from "../src/qa-assistant-routes.js";
 import {
   registerQaConversationRoutes,
@@ -185,7 +185,7 @@ test("public GitHub import uses bounded API content, ignores unsafe paths, and d
   });
 
   assert.equal(imported.revision, "revision-123");
-  assert.deepEqual(imported.files.map((item) => item.path), ["package.json", "src/index.ts", "README.md"]);
+  assert.deepEqual(imported.files.map((item) => item.path), ["package.json", "README.md", "src/index.ts"]);
   assert.equal(imported.skipped.invalidPath, 1);
   assert.equal(imported.skipped.unsupported, 1);
   assert.match(imported.files.find((item) => item.path === "src/index.ts")?.content ?? "", /export const add/u);
@@ -205,8 +205,8 @@ test("GitHub import emits only stages reached by bounded repository operations",
   ]);
   assert.deepEqual(progress.slice(3).map((event) => event.filePath), [
     "package.json",
-    "src/index.ts",
     "README.md",
+    "src/index.ts",
   ]);
   assert.equal(progress.some((event) => event.stage === "analyzing_files"), false);
   assert.equal(progress[3]?.processedFiles, 0);
@@ -244,7 +244,7 @@ test("GitHub QA inventories test paths outside the bounded sample and selects re
   });
 
   assert.deepEqual(imported.files.map((item) => item.path), [
-    "package.json", "test/app.js", "tests/integration.spec.ts", "src/entry.ts", "README.md",
+    "package.json", "README.md", "src/entry.ts", "test/app.js", "tests/integration.spec.ts",
   ]);
   assert.deepEqual(imported.inventory.testFiles, { discovered: 3, selected: 2 });
   assert.deepEqual(imported.inventory.categories.find((item) => item.category === "test"), {
@@ -291,7 +291,7 @@ test("GitHub import preserves repository and transport failure boundaries", asyn
         return Response.json({ sha: "revision-limited", truncated: true, tree: [] });
       },
     }),
-    (error: unknown) => error instanceof GithubImportError && error.code === "repository_limit_exceeded",
+    (error: unknown) => error instanceof GithubImportError && error.code === "repository_tree_truncated",
   );
   await assert.rejects(
     importPublicGithubRepository("https://github.com/acme/demo", {
@@ -299,6 +299,231 @@ test("GitHub import preserves repository and transport failure boundaries", asyn
     }),
     (error: unknown) => error instanceof GithubImportError && error.code === "github_unavailable",
   );
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => new Response("missing", { status: 404 }),
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "repository_not_found",
+  );
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => Response.json({ private: true, default_branch: "main" }),
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "repository_not_public",
+  );
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => { throw new DOMException("timed out", "TimeoutError"); },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "github_timeout",
+  );
+});
+
+test("QA job runner persists a bounded analysis timeout rather than a generic failed state", async () => {
+  const job: QaAnalysisJobRecord = {
+    id: "55555555-5555-4555-8555-555555555555",
+    projectId,
+    createdByUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    conversationId: null,
+    analysisRunId: null,
+    idempotencyKey: "66666666-6666-4666-8666-666666666666",
+    repositoryUrl: "https://github.com/acme/demo",
+    status: "queued",
+    stage: "queued",
+    nextSequence: 1,
+    errorCode: null,
+    errorMessage: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    startedAt: null,
+    completedAt: null,
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+  let resolveFailure: (() => void) | undefined;
+  const terminal = new Promise<void>((resolve) => { resolveFailure = resolve; });
+  let failure: { code: string; message: string } | undefined;
+  const runner = new QaAnalysisJobRunner({
+    start: async () => ({ ...job, status: "running", stage: "validating_repository" }),
+    appendProgress: async () => ({ ...job, status: "running" }),
+    complete: async () => {
+      throw new Error("A timed-out job cannot complete");
+    },
+    fail: async (input: { code: string; message: string }) => {
+      failure = input;
+      resolveFailure?.();
+      return { ...job, status: "failed", stage: "failed", errorCode: input.code, errorMessage: input.message };
+    },
+  } as never, {
+    sourceStore: {
+      listForProject: async () => [],
+      ensureForProject: async () => ({ source: fakeSource(), created: true }),
+      activateIfEnabled: async () => true,
+    },
+    conversationStore: {
+      getConversation: async () => null,
+      createConversation: async () => null,
+      recordCompletedAnalysis: async () => null,
+      addMessage: async () => null,
+    },
+    fetchImpl: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }),
+    maxJobRuntimeMs: 20,
+  });
+
+  runner.enqueue(projectId, job.id);
+  await Promise.race([
+    terminal,
+    new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("QA job did not reach a terminal state")), 500)),
+  ]);
+  assert.deepEqual(failure, {
+    projectId,
+    jobId: job.id,
+    code: "analysis_timeout",
+    message: "El análisis excedió el tiempo seguro de ejecución.",
+  });
+});
+
+test("GitHub import preserves upstream status and bounded rate-limit metadata", async () => {
+  const cases: Array<{
+    name: string;
+    response: Response;
+    code: GithubImportError["code"];
+    statusCode: number;
+  }> = [
+    {
+      name: "primary rate limit",
+      response: new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "1893456000",
+          "x-github-request-id": "safe-request-id",
+        },
+      }),
+      code: "github_rate_limited",
+      statusCode: 429,
+    },
+    {
+      name: "secondary rate limit",
+      response: new Response(JSON.stringify({ message: "You have exceeded a secondary rate limit." }), {
+        status: 403,
+        headers: { "retry-after": "30" },
+      }),
+      code: "github_secondary_rate_limited",
+      statusCode: 429,
+    },
+    {
+      name: "forbidden response",
+      response: new Response(JSON.stringify({ message: "Resource not accessible" }), { status: 403 }),
+      code: "github_forbidden",
+      statusCode: 502,
+    },
+    {
+      name: "too many requests",
+      response: new Response(JSON.stringify({ message: "Too many requests" }), { status: 429 }),
+      code: "github_rate_limited",
+      statusCode: 429,
+    },
+    {
+      name: "upstream unavailable",
+      response: new Response("unavailable", { status: 503 }),
+      code: "github_unavailable",
+      statusCode: 503,
+    },
+    {
+      name: "unexpected client response",
+      response: new Response("bad request", { status: 400 }),
+      code: "invalid_github_response",
+      statusCode: 502,
+    },
+  ];
+
+  for (const fixture of cases) {
+    await assert.rejects(
+      importPublicGithubRepository("https://github.com/acme/demo", {
+        fetchImpl: async () => fixture.response.clone(),
+      }),
+      (error: unknown) => {
+        if (!(error instanceof GithubImportError)) return false;
+        assert.equal(error.code, fixture.code, fixture.name);
+        assert.equal(error.status, fixture.response.status, fixture.name);
+        assert.equal(mapGithubImportError(error).statusCode, fixture.statusCode, fixture.name);
+        if (fixture.name === "primary rate limit") {
+          assert.deepEqual(error.rateLimit, {
+            remaining: 0,
+            resetAt: 1_893_456_000,
+            retryAfterSeconds: null,
+            requestId: "safe-request-id",
+          });
+        }
+        return true;
+      },
+    );
+  }
+
+  let quotaRequest = 0;
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => {
+        quotaRequest += 1;
+        return quotaRequest === 1
+          ? Response.json({ private: false, default_branch: "main" })
+          : Response.json(
+            { sha: "quota-exhausted", truncated: false, tree: [{ path: "src/app.ts", type: "blob", size: 1 }] },
+            { headers: { "x-ratelimit-remaining": "0" } },
+          );
+      },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "github_rate_limited",
+  );
+  assert.equal(quotaRequest, 2);
+});
+
+test("GitHub import classifies repository boundaries without reducing an incomplete sample to success", async () => {
+  const metadata = () => Response.json({ private: false, default_branch: "main" });
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+        return url.pathname === "/repos/acme/demo"
+          ? metadata()
+          : Response.json({ sha: "revision-too-large", truncated: false, tree: Array.from({ length: 2_001 }, (_, index) => ({ path: `src/${index}.ts`, type: "blob", size: 1 })) });
+      },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "repository_too_large",
+  );
+
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/repos/acme/demo") return metadata();
+        if (url.pathname === "/repos/acme/demo/git/trees/main") {
+          return Response.json({ sha: "revision-content", truncated: false, tree: [{ path: "src/app.ts", type: "blob", size: 1 }] });
+        }
+        return Response.json({ encoding: "binary", content: "not-base64" });
+      },
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "unsupported_repository_content",
+  );
+
+  await assert.rejects(
+    importPublicGithubRepository("https://github.com/acme/demo", {
+      fetchImpl: async () => Response.json({ private: false }),
+    }),
+    (error: unknown) => error instanceof GithubImportError && error.code === "invalid_github_response",
+  );
+});
+
+test("GitHub error mapping retains safe, distinct messages for analysis timeout and internal failure", () => {
+  assert.deepEqual(mapGithubImportError(new GithubImportError("analysis_timeout")), {
+    statusCode: 504,
+    message: "El análisis excedió el tiempo seguro de ejecución.",
+  });
+  assert.deepEqual(mapGithubImportError(new GithubImportError("internal_analysis_error")), {
+    statusCode: 503,
+    message: "No se pudo completar la importación y el análisis.",
+  });
 });
 
 test("static QA findings retain precise evidence and redact private material", () => {
@@ -325,6 +550,53 @@ test("static QA findings retain precise evidence and redact private material", (
   assert.ok(report.findings.some((item) => item.ruleId === "qa.security.dynamic_eval"));
   assert.equal(report.findings.some((item) => item.ruleId === "qa.testing.no_discovered_test_files"), false);
   assert.doesNotMatch(JSON.stringify(report), /global quality score|ejecutó pruebas/iu);
+});
+
+test("static QA derives bounded TypeScript AST facts without executing or resolving imported code", () => {
+  const report = analyzeQaProject({
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "revision-ast",
+    inventory: inventory({ discoveredFiles: 3, selectedFiles: 3 }),
+    files: [
+      file("package.json", JSON.stringify({ scripts: { test: "node --test", lint: "eslint ." }, dependencies: { fastify: "x" } })),
+      file("README.md", "# Demo\n\n## Tests\n\nnpm test\n"),
+      file("src/analysis.ts", [
+        "import { helper } from './helper';",
+        "const documentation = 'eval(userInput) is only text here';",
+        "// eval(commentOnly)",
+        "export function analyze(input: string) {",
+        "  if (input && helper) return eval(input);",
+        "  return input;",
+        "}",
+      ].join("\n")),
+    ],
+  });
+
+  assert.equal(report.codeIntelligence.version, "qa-code-intelligence-v1");
+  assert.equal(report.codeIntelligence.summary.parsedFileCount, 1);
+  assert.equal(report.codeIntelligence.summary.languageCounts.typescript, 1);
+  assert.deepEqual(report.codeIntelligence.manifests[0]?.scripts, ["lint", "test"]);
+  assert.deepEqual(report.codeIntelligence.readmes[0]?.headings, ["Demo", "Tests"]);
+  const analyzed = report.codeIntelligence.analyzedFiles[0];
+  assert.equal(analyzed?.path, "src/analysis.ts");
+  assert.ok(analyzed?.symbols.some((symbol) => symbol.name === "analyze" && symbol.kind === "function"));
+  assert.ok(analyzed?.relations.some((relation) => relation.kind === "imports" && relation.to === "./helper"));
+  assert.ok((analyzed?.cyclomaticComplexity ?? 0) >= 2);
+  const evalFindings = report.findings.filter((item) => item.ruleId === "qa.security.dynamic_eval");
+  assert.equal(evalFindings.length, 1);
+  assert.equal(evalFindings[0]?.evidence.startLine, 5);
+  assert.equal(report.limitations.some((item) => /no crea un Program/iu.test(item)), true);
+});
+
+test("static QA retains TypeScript parse diagnostics as bounded metadata", () => {
+  const report = analyzeQaProject({
+    repositoryUrl: "https://github.com/acme/demo",
+    revision: "revision-parse-diagnostic",
+    inventory: inventory({ discoveredFiles: 1, selectedFiles: 1 }),
+    files: [file("src/broken.ts", "export const = ;\n")],
+  });
+  assert.equal(report.codeIntelligence.analyzedFiles[0]?.path, "src/broken.ts");
+  assert.ok((report.codeIntelligence.analyzedFiles[0]?.parseDiagnostics ?? 0) > 0);
 });
 
 test("static QA never turns an incomplete sample into a claim that tests are absent", () => {

@@ -14,6 +14,7 @@ import { registerIngestionRoutes } from "./ingestion-routes.js";
 import { registerProductRoutes } from "./product-routes.js";
 import { ProductRepository } from "./product-repository.js";
 import { registerQaRoutes } from "./qa-routes.js";
+import { GithubImportError } from "./github-repository-import.js";
 import { QaAnalysisJobRepository } from "./qa-analysis-job-repository.js";
 import { QaAnalysisJobRunner } from "./qa-analysis-job-runner.js";
 import { registerQaAnalysisJobRoutes } from "./qa-analysis-job-routes.js";
@@ -128,7 +129,21 @@ async function main(): Promise<void> {
     ? new QaAnalysisJobRunner(qaAnalysisJobRepository, {
         sourceStore: sourceRepository,
         conversationStore: qaConversationRepository,
-        onError: (error, jobId) => app.log.error({ err: error, jobId }, "QA analysis job failed"),
+        onError: (error, jobId) => {
+          if (error instanceof GithubImportError) {
+            app.log.error({
+              jobId,
+              errorCode: error.code,
+              githubStatus: error.status,
+              githubRequestId: error.rateLimit?.requestId ?? null,
+              rateLimitRemaining: error.rateLimit?.remaining ?? null,
+              rateLimitResetAt: error.rateLimit?.resetAt ?? null,
+              retryAfterSeconds: error.rateLimit?.retryAfterSeconds ?? null,
+            }, "QA analysis job failed at GitHub");
+            return;
+          }
+          app.log.error({ jobId, errorCode: "internal_analysis_error" }, "QA analysis job failed");
+        },
       })
     : undefined;
 

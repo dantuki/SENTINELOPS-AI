@@ -72,7 +72,7 @@ const githubImportResponseSchema = {
 } as const;
 
 export function mapGithubImportError(error: GithubImportError): {
-  statusCode: 400 | 404 | 409 | 422 | 502 | 503 | 504;
+  statusCode: 400 | 404 | 409 | 422 | 429 | 502 | 503 | 504;
   message: string;
 } {
   switch (error.code) {
@@ -82,14 +82,28 @@ export function mapGithubImportError(error: GithubImportError): {
       return { statusCode: 404, message: "No se encontró el repositorio público indicado." };
     case "repository_not_public":
       return { statusCode: 422, message: "Solo se pueden importar repositorios públicos de GitHub." };
-    case "repository_limit_exceeded":
+    case "github_rate_limited":
+      return { statusCode: 429, message: "GitHub limitó temporalmente las solicitudes. Espera antes de iniciar un nuevo análisis." };
+    case "github_secondary_rate_limited":
+      return { statusCode: 429, message: "GitHub limitó temporalmente esta actividad. Espera antes de iniciar un nuevo análisis." };
+    case "github_forbidden":
+      return { statusCode: 502, message: "GitHub rechazó la solicitud de análisis para este repositorio público." };
+    case "repository_too_large":
       return { statusCode: 422, message: "El repositorio supera los límites seguros de inspección del MVP." };
+    case "repository_tree_truncated":
+      return { statusCode: 422, message: "GitHub devolvió un inventario de archivos truncado; no es seguro analizarlo de forma parcial." };
+    case "unsupported_repository_content":
+      return { statusCode: 422, message: "El repositorio contiene contenido no compatible con la inspección segura." };
     case "github_timeout":
       return { statusCode: 504, message: "GitHub tardó demasiado en responder." };
-    case "github_invalid_response":
+    case "analysis_timeout":
+      return { statusCode: 504, message: "El análisis excedió el tiempo seguro de ejecución." };
+    case "invalid_github_response":
       return { statusCode: 502, message: "GitHub devolvió una respuesta no válida para el análisis." };
     case "github_unavailable":
       return { statusCode: 503, message: "GitHub no está disponible temporalmente." };
+    case "internal_analysis_error":
+      return { statusCode: 503, message: "No se pudo completar la importación y el análisis." };
   }
 }
 
@@ -135,6 +149,7 @@ export function registerQaRoutes(app: FastifyInstance, options: QaRouteOptions =
           404: apiErrorSchema,
           409: apiErrorSchema,
           422: apiErrorSchema,
+          429: apiErrorSchema,
           502: apiErrorSchema,
           503: apiErrorSchema,
           504: apiErrorSchema,

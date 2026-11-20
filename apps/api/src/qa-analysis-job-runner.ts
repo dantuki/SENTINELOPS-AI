@@ -4,6 +4,7 @@ import {
   isQaAnalysisExecutionError,
   type QaSourceStore,
 } from "./qa-analysis-execution.js";
+import { GithubImportError } from "./github-repository-import.js";
 import {
   QaAnalysisJobRepository,
   type QaAnalysisJobProgress,
@@ -73,7 +74,11 @@ export class QaAnalysisJobRunner {
     if (!job) return;
     const abortController = new AbortController();
     const timeoutMs = this.options.maxJobRuntimeMs ?? 120_000;
-    const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+    let didReachRuntimeLimit = false;
+    const timeout = setTimeout(() => {
+      didReachRuntimeLimit = true;
+      abortController.abort(new Error("analysis_timeout"));
+    }, timeoutMs);
     try {
       const result = await executeQaAnalysis({
         projectId,
@@ -98,7 +103,9 @@ export class QaAnalysisJobRunner {
       });
       if (!completed) throw new Error("QA job could not transition to completed");
     } catch (error: unknown) {
-      const failure = this.failureFor(error);
+      const failure = this.failureFor(
+        didReachRuntimeLimit ? new GithubImportError("analysis_timeout") : error,
+      );
       try {
         await this.jobs.fail({ projectId, jobId, ...failure });
       } catch (failurePersistenceError: unknown) {
@@ -120,7 +127,7 @@ export class QaAnalysisJobRunner {
       return { code: error.code, message: mapped.message };
     }
     return {
-      code: "analysis_failed",
+      code: "internal_analysis_error",
       message: "El análisis no pudo completarse. Inicia uno nuevo para volver a intentarlo.",
     };
   }

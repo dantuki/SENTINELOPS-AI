@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   answerQaQuestion,
+  isTerminalQaAnalysisJob,
   isQaAnalysisJob,
   isQaAnalysisJobEvent,
   isQaAssistantResponse,
@@ -25,6 +26,10 @@ test("QA error presentation distinguishes missing persistence from GitHub availa
   assert.equal(
     messageForQaApiFailure(503, { error: "GitHub no está disponible temporalmente." }),
     "El servicio de importación no está disponible temporalmente.",
+  );
+  assert.equal(
+    messageForQaApiFailure(429),
+    "GitHub limitó temporalmente las solicitudes. Espera antes de iniciar un nuevo análisis.",
   );
 });
 
@@ -156,6 +161,9 @@ test("QA job and assistant presentation contracts reject malformed server state"
     updatedAt: "2026-01-01T00:00:02.000Z",
   };
   assert.equal(isQaAnalysisJob(job), true);
+  assert.equal(isTerminalQaAnalysisJob(job), false);
+  assert.equal(isTerminalQaAnalysisJob({ ...job, status: "completed" }), true);
+  assert.equal(isTerminalQaAnalysisJob({ ...job, status: "failed" }), true);
   assert.equal(isQaAnalysisJob({ ...job, stage: "imagined_stage" }), false);
   assert.equal(isQaAnalysisJobEvent({
     jobId: job.id, projectId: job.projectId, sequence: 4, stage: "reading_source", status: "running",
@@ -178,6 +186,10 @@ test("the QA presentation contract preserves source evidence and rejects malform
   assert.equal(isQaImportResult({ ...fixture, conversation: { id: "x" } }), false);
   assert.equal(isQaImportResult({ ...fixture, persistence: { status: "unavailable" } }), true);
   assert.equal(isQaImportResult({ ...fixture, persistence: { status: "persisted" } }), false);
+  assert.equal(isQaImportResult({
+    ...fixture,
+    analysis: { ...fixture.analysis, codeIntelligence: { version: "qa-code-intelligence-v1", summary: { parsedFileCount: "not-a-number" } } },
+  }), false);
   assert.equal(isQaImportResult({ ...fixture, analysis: { ...fixture.analysis, inventory: { ...fixture.analysis.inventory, testFiles: {} as unknown as { discovered: number; selected: number } } } }), false);
 });
 
